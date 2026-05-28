@@ -31,7 +31,7 @@ type Config struct {
 func Load() *Config {
 	model := os.Getenv("OLLAMA_AGENT_MODEL")
 	if model == "" {
-		model = "qwen.3.5:4b"
+		model = "qwen3.5:4b"
 	}
 
 	baseURL := os.Getenv("OLLAMA_BASE_URL")

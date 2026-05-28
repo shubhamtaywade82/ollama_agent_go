@@ -16,8 +16,8 @@ func TestLoadDefaults(t *testing.T) {
 	os.Unsetenv("OLLAMA_AGENT_ROOT")
 
 	cfg := Load()
-	if cfg.Model != "qwen.3.5:4b" {
-		t.Errorf("default model = %q, want qwen.3.5:4b", cfg.Model)
+	if cfg.Model != "qwen3.5:4b" {
+		t.Errorf("default model = %q, want qwen3.5:4b", cfg.Model)
 	}
 	if cfg.BaseURL != "http://localhost:11434" {
 		t.Errorf("default baseURL = %q", cfg.BaseURL)
