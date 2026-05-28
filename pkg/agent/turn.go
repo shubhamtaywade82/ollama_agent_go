@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"ollama_agent_go/pkg/ollama"
-	"ollama_agent_go/pkg/tools"
 )
 
 // fencedBlock matches a fenced code block, optionally tagged (```json, ```tool_call).
@@ -118,7 +117,7 @@ func firstNonNil(vals ...map[string]any) map[string]any {
 // SystemPrompt builds the agent's system instructions, listing the available
 // tools and the synthetic call format as a fallback for models without native
 // tool calling.
-func SystemPrompt(registry *tools.Registry) string {
+func SystemPrompt(registry ToolRunner) string {
 	var b strings.Builder
 	b.WriteString("You are a precise terminal coding agent operating inside a sandboxed project directory. ")
 	b.WriteString("Use the provided tools to inspect and modify files; do not guess file contents. ")

@@ -50,10 +50,19 @@ type Chatter interface {
 	Chat(ctx context.Context, req ollama.ChatRequest) (ollama.ChatResponse, error)
 }
 
+// ToolRunner is the interface the agent uses to list and execute tools.
+// Both *tools.Registry and *tools.GatedRegistry satisfy it.
+type ToolRunner interface {
+	Names() []string
+	Get(name string) (tools.Tool, bool)
+	Specs() []tools.Spec
+	Execute(ctx context.Context, name string, args map[string]any) (string, error)
+}
+
 // Agent runs the think-act loop against a model backend with a tool registry.
 type Agent struct {
 	Client        Chatter
-	Registry      *tools.Registry
+	Registry      ToolRunner
 	Model         string
 	System        string
 	MaxIterations int
@@ -64,7 +73,7 @@ type Agent struct {
 }
 
 // New builds an Agent with sensible defaults.
-func New(client Chatter, registry *tools.Registry, model string) *Agent {
+func New(client Chatter, registry ToolRunner, model string) *Agent {
 	return &Agent{
 		Client:        client,
 		Registry:      registry,

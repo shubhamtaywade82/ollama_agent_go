@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -93,7 +94,7 @@ type Model struct {
 	// Config & backend
 	cfg          *config.Config
 	agent        *agent.Agent
-	registry     *tools.Registry
+	registry     agent.ToolRunner
 	loadedSkills []skills.Skill // skills injected into the system prompt
 	ollamaClient  *ollama.Client
 
@@ -141,8 +142,16 @@ func NewModel(cfg *config.Config) *Model {
 	logger := log.New(nil) // nil = discard by default; caller can redirect
 	logger.SetLevel(log.DebugLevel)
 
-	// Tool registry sandboxed to project root
-	registry := tools.Default(cfg.Root)
+	// Tool registry sandboxed to project root.
+	// Wrap with approval gate for destructive tools unless OLLAMA_AGENT_NO_APPROVAL=1.
+	baseRegistry := tools.Default(cfg.Root)
+	var registry agent.ToolRunner = baseRegistry
+	if os.Getenv("OLLAMA_AGENT_NO_APPROVAL") != "1" {
+		gatedNames := []string{"write_file", "run_shell", "edit_file"}
+		registry = tools.NewGatedRegistry(baseRegistry, gatedNames, func(name string, args map[string]any) bool {
+			return RequestApproval(name, args) == approvalGranted
+		})
+	}
 
 	// Ollama client + agent
 	client := ollama.NewClient(cfg.BaseURL)
