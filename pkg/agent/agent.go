@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"ollama_agent_go/pkg/ollama"
+	"ollama_agent_go/pkg/tokens"
 	"ollama_agent_go/pkg/tools"
 )
 
@@ -57,6 +58,9 @@ type Agent struct {
 	System        string
 	MaxIterations int
 	Options       map[string]any
+	// ContextBudget caps the tokens sent per request via sliding-window
+	// trimming. Zero disables trimming.
+	ContextBudget int
 }
 
 // New builds an Agent with sensible defaults.
@@ -96,7 +100,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 		}
 		resp, err := a.Client.Chat(ctx, ollama.ChatRequest{
 			Model:    a.Model,
-			Messages: msgs,
+			Messages: tokens.Trim(msgs, a.ContextBudget),
 			Tools:    specs,
 			Options:  a.Options,
 		})

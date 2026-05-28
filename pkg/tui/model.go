@@ -2,249 +2,678 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
 	"ollama_agent_go/pkg/agent"
 	"ollama_agent_go/pkg/config"
 	"ollama_agent_go/pkg/ollama"
+	"ollama_agent_go/pkg/skills"
 	"ollama_agent_go/pkg/tools"
 )
 
-// ChatMessage is one rendered line of conversation. Role is "user", "agent",
-// or "tool" (informational tool-activity lines).
-type ChatMessage struct {
-	Role    string
+// ── Agent event plumbing ─────────────────────────────────────────────────────
+
+// agentEvent wraps agent.Event for BubbleTea's message bus.
+type agentEvent agent.Event
+
+// agentDone is sent when the Run goroutine finishes (success or error).
+type agentDone struct{ err error }
+
+// ── Chat entry types ─────────────────────────────────────────────────────────
+
+type entryKind int
+
+const (
+	entryUser entryKind = iota
+	entryAgent
+	entryToolCall
+	entryToolResult
+	entryError
+	entrySystem
+)
+
+// ChatEntry is one rendered line/block in the conversation viewport.
+type ChatEntry struct {
+	Kind    entryKind
 	Content string
+	Tool    string // for tool events
 }
 
-// eventMsg carries an agent event into the Bubble Tea update loop.
-type eventMsg agent.Event
+// ── Status ───────────────────────────────────────────────────────────────────
 
-// Model is the Bubble Tea model for the agent REPL.
+type appStatus int
+
+const (
+	statusReady appStatus = iota
+	statusThinking
+	statusTool
+	statusError
+)
+
+// ── Session stats ─────────────────────────────────────────────────────────────
+
+type sessionStats struct {
+	turns     int
+	toolCalls int
+	startedAt time.Time
+}
+
+// ── Main model ────────────────────────────────────────────────────────────────
+
+// Model is the root BubbleTea model for the Ollama Agent TUI.
 type Model struct {
-	viewport    viewport.Model
-	textInput   textinput.Model
-	history     []ChatMessage
-	status      string
-	isStreaming bool
-	width       int
-	height      int
-	config      *config.Config
-	agent       *agent.Agent
-	ctx         context.Context
-	cancel      context.CancelFunc
-	events      chan agent.Event
+	// Layout
+	width  int
+	height int
+
+	// Sub-models
+	viewport  viewport.Model
+	textInput textinput.Model
+	spinner   spinner.Model
+
+	// App state
+	status      appStatus
+	statusText  string // current tool name when status == statusTool
+	entries     []ChatEntry
+	history     []ollama.Message // raw history for agent
+	stats       sessionStats
+	currentResp strings.Builder // accumulate streaming agent text
+
+	// Config & backend
+	cfg      *config.Config
+	agent    *agent.Agent
+	registry *tools.Registry
+
+	// Context for cancellable runs
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// Active agent event channel (nil when idle)
+	eventCh chan agent.Event
+
+	// Glamour renderer (markdown)
+	renderer *glamour.TermRenderer
+
+	// Logger (writes to a log file; not to the TUI surface)
+	logger *log.Logger
 }
 
-// NewModel constructs the TUI model wired to a tool-using agent.
-func NewModel(cfg *config.Config) Model {
+// NewModel builds the initial TUI model.
+func NewModel(cfg *config.Config) *Model {
+	// Text input
 	ti := textinput.New()
-	ti.Placeholder = "Ask the agent..."
+	ti.Placeholder = "Type a message or /help…"
 	ti.Focus()
+	ti.CharLimit = 4096
 
+	// Viewport
 	vp := viewport.New(80, 20)
-	vp.SetContent("Ollama Agent (Go) ready. Tools: read/write/ls/grep/shell/edit.")
+	vp.SetContent(welcomeText())
+
+	// Spinner
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(colorAmber)
+
+	// Glamour renderer (dark auto-theme)
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(0), // we control wrapping via lipgloss
+	)
+
+	// File logger so we don't pollute the TUI surface
+	logger := log.New(nil) // nil = discard by default; caller can redirect
+	logger.SetLevel(log.DebugLevel)
+
+	// Tool registry sandboxed to project root
+	registry := tools.Default(cfg.Root)
+
+	// Ollama client + agent
+	client := ollama.NewClient(cfg.BaseURL)
+	ag := agent.New(client, registry, cfg.Model)
+	ag.ContextBudget = cfg.ContextBudget
+	// Inject optional Markdown skills into the system prompt.
+	if loaded, err := skills.Load(cfg.SkillsDir); err == nil {
+		ag.System = skills.Inject(ag.System, loaded)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client := ollama.NewClient(cfg.BaseURL)
-	registry := tools.Default(cfg.Root)
-	ag := agent.New(client, registry, cfg.Model)
-
-	return Model{
-		textInput: ti,
+	return &Model{
 		viewport:  vp,
-		status:    "READY",
-		config:    cfg,
+		textInput: ti,
+		spinner:   sp,
+		status:    statusReady,
+		cfg:       cfg,
 		agent:     ag,
+		registry:  registry,
+		renderer:  renderer,
+		logger:    logger,
 		ctx:       ctx,
 		cancel:    cancel,
-		events:    make(chan agent.Event, 64),
+		stats:     sessionStats{startedAt: time.Now()},
 	}
 }
 
-func (m Model) Init() tea.Cmd { return textinput.Blink }
+// ── Init ─────────────────────────────────────────────────────────────────────
 
-func waitForEvent(ch chan agent.Event) tea.Cmd {
-	return func() tea.Msg {
-		e, ok := <-ch
-		if !ok {
-			return eventMsg{Kind: agent.EventDone}
-		}
-		return eventMsg(e)
-	}
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, m.spinner.Tick)
 }
 
-// conversation builds the ollama message history (user/assistant only) for the
-// agent, dropping informational tool lines.
-func (m Model) conversation() []ollama.Message {
-	var msgs []ollama.Message
-	for _, h := range m.history {
-		switch h.Role {
-		case "user":
-			msgs = append(msgs, ollama.Message{Role: "user", Content: h.Content})
-		case "agent":
-			msgs = append(msgs, ollama.Message{Role: "assistant", Content: h.Content})
-		}
-	}
-	return msgs
-}
+// ── Update ────────────────────────────────────────────────────────────────────
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var (
-		tiCmd tea.Cmd
-		vpCmd tea.Cmd
-	)
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			m.cancel()
-			return m, tea.Quit
-		case tea.KeyEnter:
-			if m.isStreaming {
-				return m, nil
-			}
-			query := strings.TrimSpace(m.textInput.Value())
-			if query == "" {
-				return m, nil
-			}
-			m.history = append(m.history, ChatMessage{Role: "user", Content: query})
-			m.textInput.Reset()
-			m.isStreaming = true
-			m.status = "THINKING"
-			m.updateViewport()
 
-			convo := m.conversation()
-			go func() {
-				_, _ = m.agent.Run(m.ctx, convo, func(e agent.Event) {
-					m.events <- e
-				})
-				close(m.events)
-			}()
-			return m, waitForEvent(m.events)
-		}
-
-	case eventMsg:
-		return m.handleEvent(agent.Event(msg))
-
+	// ── Window resize ────────────────────────────────────────────────────────
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 6
-		m.textInput.Width = msg.Width - 4
-		m.updateViewport()
+		sidebarW := 28 // sidebar + border
+		chatW := m.width - sidebarW - 2
+		if chatW < 20 {
+			chatW = 20
+			sidebarW = 0
+		}
+		m.viewport.Width = chatW
+		m.viewport.Height = m.height - 7 // header + input + status + borders
+		m.textInput.Width = chatW - 4
+		// Re-render with new width
+		if m.renderer != nil {
+			m.renderer, _ = glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(chatW-4),
+			)
+		}
+		m.rebuildViewport()
+
+	// ── Keyboard ─────────────────────────────────────────────────────────────
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			m.cancel()
+			return m, tea.Quit
+
+		case tea.KeyEsc:
+			if m.status == statusThinking || m.status == statusTool {
+				m.cancel()
+				m.ctx, m.cancel = context.WithCancel(context.Background())
+				m.status = statusReady
+				m.entries = append(m.entries, ChatEntry{
+					Kind:    entrySystem,
+					Content: "⚠️  Request cancelled.",
+				})
+				m.rebuildViewport()
+				return m, nil
+			}
+
+		case tea.KeyEnter:
+			if m.status != statusReady {
+				return m, nil
+			}
+			input := strings.TrimSpace(m.textInput.Value())
+			if input == "" {
+				return m, nil
+			}
+			m.textInput.Reset()
+			cmd := m.handleInput(input)
+			return m, cmd
+
+		case tea.KeyCtrlL:
+			m.entries = nil
+			m.rebuildViewport()
+			return m, nil
+		}
+
+	// ── Spinner tick ──────────────────────────────────────────────────────────
+	case spinner.TickMsg:
+		var spCmd tea.Cmd
+		m.spinner, spCmd = m.spinner.Update(msg)
+		cmds = append(cmds, spCmd)
+
+	// ── Agent events (streaming) ──────────────────────────────────────────────
+	case agentEvent:
+		if m.eventCh != nil {
+			cmds = append(cmds, m.handleAgentEvent(agent.Event(msg)))
+		}
+
+	// ── Agent done ────────────────────────────────────────────────────────────
+	case agentDone:
+		m.eventCh = nil
+		// Flush any accumulated agent text
+		if m.currentResp.Len() > 0 {
+			rendered := m.renderMarkdown(m.currentResp.String())
+			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: rendered})
+			m.currentResp.Reset()
+		}
+		if msg.err != nil {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entryError,
+				Content: fmt.Sprintf("Error: %v", msg.err),
+			})
+			m.status = statusError
+		} else {
+			m.status = statusReady
+		}
+		m.rebuildViewport()
 	}
 
+	// Always update sub-models
+	var tiCmd, vpCmd tea.Cmd
 	m.textInput, tiCmd = m.textInput.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
-	return m, tea.Batch(tiCmd, vpCmd)
+	cmds = append(cmds, tiCmd, vpCmd)
+
+	return m, tea.Batch(cmds...)
 }
 
-func (m Model) handleEvent(e agent.Event) (tea.Model, tea.Cmd) {
-	switch e.Kind {
+// handleInput processes a user message or slash command.
+func (m *Model) handleInput(input string) tea.Cmd {
+	if strings.HasPrefix(input, "/") {
+		return m.handleSlashCommand(input)
+	}
+
+	// Regular message
+	m.entries = append(m.entries, ChatEntry{Kind: entryUser, Content: input})
+	m.history = append(m.history, ollama.Message{Role: "user", Content: input})
+	m.stats.turns++
+	m.status = statusThinking
+	m.rebuildViewport()
+
+	// Snapshot history to pass to goroutine (avoid data race)
+	histSnap := make([]ollama.Message, len(m.history))
+	copy(histSnap, m.history)
+
+	return m.runAgent(histSnap)
+}
+
+// handleSlashCommand interprets /command inputs.
+func (m *Model) handleSlashCommand(input string) tea.Cmd {
+	parts := strings.Fields(input)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/help":
+		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: helpText()})
+
+	case "/clear":
+		m.entries = nil
+		m.history = nil
+		m.stats = sessionStats{startedAt: time.Now()}
+		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: "Session cleared."})
+
+	case "/model":
+		if len(parts) > 1 {
+			m.cfg.Model = parts[1]
+			m.agent.Model = parts[1]
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("✓ Switched model to **%s**", parts[1]),
+			})
+		} else {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("Current model: **%s**\nUsage: `/model <name>`", m.cfg.Model),
+			})
+		}
+
+	case "/tools":
+		var b strings.Builder
+		b.WriteString("**Available Tools**\n\n")
+		for _, name := range m.registry.Names() {
+			if t, ok := m.registry.Get(name); ok {
+				b.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
+			}
+		}
+		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
+
+	case "/session":
+		m.entries = append(m.entries, ChatEntry{
+			Kind: entrySystem,
+			Content: fmt.Sprintf(
+				"**Session Info**\n\n- Model: `%s`\n- Root: `%s`\n- Turns: %d\n- Tool calls: %d\n- Uptime: %s",
+				m.cfg.Model,
+				m.cfg.Root,
+				m.stats.turns,
+				m.stats.toolCalls,
+				time.Since(m.stats.startedAt).Round(time.Second),
+			),
+		})
+
+	default:
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entryError,
+			Content: fmt.Sprintf("Unknown command: `%s`. Type `/help` for a list.", cmd),
+		})
+	}
+
+	m.rebuildViewport()
+	return nil
+}
+
+// runAgent launches agent.Run in a goroutine and pipes events back via BubbleTea.
+// It stores the channel on the model for re-entrant reading.
+func (m *Model) runAgent(history []ollama.Message) tea.Cmd {
+	ch := make(chan agent.Event, 64)
+	m.eventCh = ch
+
+	emit := func(ev agent.Event) {
+		select {
+		case ch <- ev:
+		case <-m.ctx.Done():
+		}
+	}
+
+	go func() {
+		defer close(ch)
+		_, _ = m.agent.Run(m.ctx, history, emit)
+	}()
+
+	return waitForAgentEvent(ch)
+}
+
+// waitForAgentEvent returns a tea.Cmd that blocks on one read from ch.
+func waitForAgentEvent(ch <-chan agent.Event) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return agentDone{}
+		}
+		if ev.Kind == agent.EventError {
+			return agentDone{err: fmt.Errorf("%s", ev.Text)}
+		}
+		return agentEvent(ev)
+	}
+}
+
+// handleAgentEvent processes one agent event and returns the next read command.
+func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
+	switch ev.Kind {
 	case agent.EventToken:
-		m.appendAgentText(e.Text)
-		m.updateViewport()
-		return m, waitForEvent(m.events)
+		m.currentResp.WriteString(ev.Text)
+		m.rebuildViewport()
 
 	case agent.EventToolCall:
-		m.history = append(m.history, ChatMessage{Role: "tool", Content: "⚙ " + e.Tool + " " + compactArgs(e.Args)})
-		m.status = "RUNNING " + e.Tool
-		m.updateViewport()
-		return m, waitForEvent(m.events)
+		// Flush partial agent text before showing tool call
+		if m.currentResp.Len() > 0 {
+			rendered := m.renderMarkdown(m.currentResp.String())
+			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: rendered})
+			m.currentResp.Reset()
+		}
+		m.stats.toolCalls++
+		m.status = statusTool
+		m.statusText = ev.Tool
+		var argParts []string
+		for k, v := range ev.Args {
+			argParts = append(argParts, fmt.Sprintf("`%s`: %v", k, v))
+		}
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entryToolCall,
+			Content: fmt.Sprintf("**%s**(%s)", ev.Tool, strings.Join(argParts, ", ")),
+			Tool:    ev.Tool,
+		})
+		m.rebuildViewport()
 
 	case agent.EventToolResult:
-		m.history = append(m.history, ChatMessage{Role: "tool", Content: "↳ " + truncate(e.Text, 400)})
-		m.updateViewport()
-		return m, waitForEvent(m.events)
-
-	case agent.EventError:
-		m.history = append(m.history, ChatMessage{Role: "agent", Content: "Error: " + e.Text})
-		m.isStreaming = false
-		m.status = "ERROR"
-		m.resetEvents()
-		m.updateViewport()
-		return m, nil
+		m.status = statusThinking
+		content := ev.Text
+		if len(content) > 400 {
+			content = content[:400] + "…"
+		}
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entryToolResult,
+			Content: content,
+			Tool:    ev.Tool,
+		})
+		m.rebuildViewport()
 
 	case agent.EventDone:
-		m.isStreaming = false
-		m.status = "READY"
-		m.resetEvents()
-		m.updateViewport()
-		return m, nil
+		// Will be handled by agentDone message when channel closes
 	}
-	return m, waitForEvent(m.events)
+
+	// Schedule next read from the same channel
+	if m.eventCh != nil {
+		return waitForAgentEvent(m.eventCh)
+	}
+	return nil
 }
 
-// resetEvents replaces the closed channel so the next turn has a fresh one.
-func (m *Model) resetEvents() { m.events = make(chan agent.Event, 64) }
+// ── View ──────────────────────────────────────────────────────────────────────
 
-func (m *Model) appendAgentText(text string) {
-	if n := len(m.history); n > 0 && m.history[n-1].Role == "agent" {
-		m.history[n-1].Content += text
-	} else {
-		m.history = append(m.history, ChatMessage{Role: "agent", Content: text})
+func (m *Model) View() string {
+	if m.width == 0 {
+		return "Initializing…"
+	}
+
+	sidebarW := 28
+	chatW := m.width - sidebarW - 2
+	if chatW < 30 {
+		// Narrow terminal: single-column layout
+		return m.singleColumnView()
+	}
+
+	header := m.renderHeader()
+	chat := m.renderChat(chatW)
+	sidebar := m.renderSidebar()
+	input := m.renderInput(chatW)
+	statusBar := m.renderStatusBar()
+
+	// Join chat + sidebar side-by-side
+	body := lipgloss.JoinHorizontal(lipgloss.Top, chat, "  ", sidebar)
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		body,
+		input,
+		statusBar,
+	)
+}
+
+func (m *Model) renderHeader() string {
+	title := TitleStyle.Render("⬡ OLLAMA AGENT")
+	sub := SubtitleStyle.Render(fmt.Sprintf(" go-powered terminal intelligence • model: %s", m.cfg.Model))
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, sub) + "\n"
+}
+
+func (m *Model) renderChat(width int) string {
+	m.viewport.Width = width
+	bordered := ViewportStyle.Width(width).Render(m.viewport.View())
+	return bordered
+}
+
+func (m *Model) renderSidebar() string {
+	uptime := time.Since(m.stats.startedAt).Round(time.Second)
+
+	rows := []string{
+		SidebarTitleStyle.Render("◈ Session"),
+		row("Model", m.cfg.Model),
+		row("Turns", fmt.Sprintf("%d", m.stats.turns)),
+		row("Tools", fmt.Sprintf("%d calls", m.stats.toolCalls)),
+		row("Uptime", uptime.String()),
+		"",
+		SidebarTitleStyle.Render("◈ Status"),
+		m.renderStatusBadge(),
+		"",
+		SidebarTitleStyle.Render("◈ Keys"),
+		shortcut("Enter", "send"),
+		shortcut("Esc", "cancel"),
+		shortcut("Ctrl+L", "clear screen"),
+		shortcut("Ctrl+C", "quit"),
+		"",
+		SidebarTitleStyle.Render("◈ Commands"),
+		shortcut("/help", "commands"),
+		shortcut("/model", "switch model"),
+		shortcut("/tools", "list tools"),
+		shortcut("/session", "stats"),
+		shortcut("/clear", "new session"),
+	}
+
+	content := strings.Join(rows, "\n")
+	return SidebarStyle.Render(content)
+}
+
+func (m *Model) renderStatusBadge() string {
+	switch m.status {
+	case statusThinking:
+		return StatusThinkingStyle.Render("⟳ THINKING")
+	case statusTool:
+		return StatusToolStyle.Render(fmt.Sprintf("⚙ %s", m.statusText))
+	case statusError:
+		return StatusErrorStyle.Render("✖ ERROR")
+	default:
+		return StatusReadyStyle.Render("✓ READY")
 	}
 }
 
-func compactArgs(args map[string]any) string {
-	if len(args) == 0 {
-		return ""
+func (m *Model) renderInput(width int) string {
+	prompt := "› "
+	style := InputBorderStyle
+	if m.status != statusReady {
+		prompt = m.spinner.View() + " "
+		style = InputFocusBorderStyle
 	}
-	b, err := json.Marshal(args)
-	if err != nil {
-		return ""
-	}
-	return truncate(string(b), 120)
+	inner := prompt + m.textInput.View()
+	return style.Width(width).Render(inner)
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+func (m *Model) renderStatusBar() string {
+	left := HelpStyle.Render(" ctrl+c quit • esc cancel • /help commands")
+	right := HelpStyle.Render(fmt.Sprintf("root: %s ", m.cfg.Root))
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 0 {
+		gap = 0
 	}
-	return s[:n] + "…"
+	return StatusBarStyle.Width(m.width).Render(
+		left + strings.Repeat(" ", gap) + right,
+	)
 }
 
-func (m *Model) updateViewport() {
+func (m *Model) singleColumnView() string {
+	return fmt.Sprintf("%s\n%s\n%s\n%s",
+		TitleStyle.Render("⬡ OLLAMA AGENT"),
+		m.viewport.View(),
+		"› "+m.textInput.View(),
+		HelpStyle.Render("ctrl+c quit"),
+	)
+}
+
+// ── Viewport rendering ────────────────────────────────────────────────────────
+
+func (m *Model) rebuildViewport() {
 	var b strings.Builder
-	for _, msg := range m.history {
-		switch msg.Role {
-		case "user":
-			b.WriteString(UserLabelStyle.Render("YOU › "))
-			b.WriteString(msg.Content)
-		case "tool":
-			b.WriteString(InfoStyle.Render(msg.Content))
-		default:
-			b.WriteString(AgentLabelStyle.Render("AGENT › "))
-			b.WriteString(msg.Content)
-		}
-		b.WriteString("\n\n")
+	for _, entry := range m.entries {
+		b.WriteString(m.renderEntry(entry))
+		b.WriteString("\n")
 	}
-
-	content := b.String()
-	if m.width > 0 {
-		content = lipgloss.NewStyle().Width(m.width - 2).Render(content)
+	// If currently streaming, show partial response
+	if m.currentResp.Len() > 0 {
+		b.WriteString(AgentLabelStyle.Render("AGENT ›"))
+		b.WriteString(" ")
+		b.WriteString(m.currentResp.String())
+		b.WriteString("\n")
 	}
-	m.viewport.SetContent(content)
+	m.viewport.SetContent(b.String())
 	m.viewport.GotoBottom()
 }
 
-func (m Model) View() string {
-	return fmt.Sprintf(
-		"%s  %s\n\n%s\n\n%s\n%s",
-		TitleStyle.Render("OLLAMA AGENT (GO)"),
-		InfoStyle.Render(fmt.Sprintf("Status: %s | Model: %s", m.status, m.config.Model)),
-		m.viewport.View(),
-		m.textInput.View(),
-		InfoStyle.Render(" (ctrl+c to quit)"),
-	)
+func (m *Model) renderEntry(e ChatEntry) string {
+	switch e.Kind {
+	case entryUser:
+		label := UserLabelStyle.Render("YOU ›")
+		return label + " " + e.Content
+
+	case entryAgent:
+		label := AgentLabelStyle.Render("AGENT ›")
+		// Content is already glamour-rendered
+		return label + "\n" + e.Content
+
+	case entryToolCall:
+		label := ToolCallLabelStyle.Render(fmt.Sprintf("⚙ TOOL › %s", e.Tool))
+		content := m.renderMarkdown(e.Content)
+		return ToolCardStyle.Render(label + "\n" + content)
+
+	case entryToolResult:
+		label := ToolResultLabelStyle.Render(fmt.Sprintf("  ↳ result from %s", e.Tool))
+		snippet := InfoStyle.Render(e.Content)
+		return label + "\n" + snippet
+
+	case entryError:
+		label := ErrorLabelStyle.Render("✖ ERROR")
+		return label + " " + e.Content
+
+	case entrySystem:
+		rendered := m.renderMarkdown(e.Content)
+		return InfoStyle.Render("──────────────────────────────") + "\n" +
+			rendered +
+			InfoStyle.Render("──────────────────────────────")
+	}
+	return e.Content
+}
+
+// renderMarkdown runs content through Glamour, falling back to plain text.
+func (m *Model) renderMarkdown(content string) string {
+	if m.renderer == nil || content == "" {
+		return content
+	}
+	out, err := m.renderer.Render(content)
+	if err != nil {
+		return content
+	}
+	return out
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func row(label, value string) string {
+	return SidebarLabelStyle.Render(label+": ") + SidebarValueStyle.Render(value)
+}
+
+func shortcut(key, desc string) string {
+	return SidebarKeyStyle.Render(key) + SidebarLabelStyle.Render(" "+desc)
+}
+
+func welcomeText() string {
+	return strings.Join([]string{
+		"",
+		"  Welcome to **Ollama Agent** (Go edition)",
+		"",
+		"  Ask me anything — I have access to your project files and shell.",
+		"  Type `/help` to see all commands.",
+		"",
+	}, "\n")
+}
+
+func helpText() string {
+	return strings.Join([]string{
+		"**Ollama Agent Commands**",
+		"",
+		"| Command | Description |",
+		"|---------|-------------|",
+		"| `/help` | Show this help |",
+		"| `/model [name]` | Show or switch the active model |",
+		"| `/tools` | List all available tools |",
+		"| `/session` | Show session statistics |",
+		"| `/clear` | Clear history and start a new session |",
+		"",
+		"**Keyboard Shortcuts**",
+		"",
+		"| Key | Action |",
+		"|----|--------|",
+		"| `Enter` | Send message |",
+		"| `Esc` | Cancel running request |",
+		"| `Ctrl+L` | Clear screen |",
+		"| `Ctrl+C` | Quit |",
+	}, "\n")
 }
