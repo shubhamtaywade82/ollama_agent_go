@@ -72,3 +72,23 @@ This document outlines the roadmap to reach 100% feature parity with the Ruby `o
 - [ ] 1:1 parity with Ruby gem's TUI and REPL commands.
 - [ ] Support for Kernel Saga-based mutation workflows.
 - [ ] Pass full suite of integration tests (porting Ruby `spec/` to Go `*_test.go`).
+
+## Phase 5: Aesthetic & Rich UI (via Charm.land)
+**Goal:** Use high-fidelity terminal components to create a "next-gen" terminal experience.
+
+1. **Reactive Log Dashboard (`charmbracelet/log`)**
+   - Replace standard fmt.Print with a structured, colorful log.
+   - Use log levels and prefixes to distinguish between LLM reasoning, Tool execution, and Kernel state changes.
+
+2. **Interactive Selection & Filtering (`charmbracelet/bubbles/list`)**
+   - Use rich lists for `/model list` and `/session list` with fuzzy searching.
+   - Implement the Approval Gate as a high-fidelity "Confirm Action" card.
+
+3. **Multi-Column Layouts (`charmbracelet/lipgloss`)**
+   - Create a dashboard view with a sidebar showing:
+     - Real-time Token Cost (LED-style digits).
+     - Active Tool status (Spinning indicators).
+     - Kernel Saga status (Progress bars).
+
+4. **Markdown Mastery (`charmbracelet/glamour`)**
+   - Render LLM responses with full syntax highlighting and theme support directly in the TUI.
