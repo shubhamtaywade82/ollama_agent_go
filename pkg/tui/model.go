@@ -17,6 +17,7 @@ import (
 	"ollama_agent_go/pkg/config"
 	"ollama_agent_go/pkg/ollama"
 	"ollama_agent_go/pkg/skills"
+	"ollama_agent_go/pkg/tokens"
 	"ollama_agent_go/pkg/tools"
 )
 
@@ -87,11 +88,14 @@ type Model struct {
 	history     []ollama.Message // raw history for agent
 	stats       sessionStats
 	currentResp strings.Builder // accumulate streaming agent text
+	tokenCount  int             // cumulative estimated tokens streamed
 
 	// Config & backend
-	cfg      *config.Config
-	agent    *agent.Agent
-	registry *tools.Registry
+	cfg          *config.Config
+	agent        *agent.Agent
+	registry     *tools.Registry
+	loadedSkills []skills.Skill // skills injected into the system prompt
+	ollamaClient  *ollama.Client
 
 	// Context for cancellable runs
 	ctx    context.Context
@@ -99,6 +103,9 @@ type Model struct {
 
 	// Active agent event channel (nil when idle)
 	eventCh chan agent.Event
+
+	// /models loading state
+	modelsLoading bool
 
 	// Glamour renderer (markdown)
 	renderer *glamour.TermRenderer
@@ -141,26 +148,31 @@ func NewModel(cfg *config.Config) *Model {
 	client := ollama.NewClient(cfg.BaseURL)
 	ag := agent.New(client, registry, cfg.Model)
 	ag.ContextBudget = cfg.ContextBudget
+	ag.MaxIterations = cfg.MaxIterations
 	// Inject optional Markdown skills into the system prompt.
+	var loadedSkills []skills.Skill
 	if loaded, err := skills.Load(cfg.SkillsDir); err == nil {
-		ag.System = skills.Inject(ag.System, loaded)
+		loadedSkills = loaded
+		ag.System = skills.Inject(ag.System, loadedSkills)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Model{
-		viewport:  vp,
-		textInput: ti,
-		spinner:   sp,
-		status:    statusReady,
-		cfg:       cfg,
-		agent:     ag,
-		registry:  registry,
-		renderer:  renderer,
-		logger:    logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		stats:     sessionStats{startedAt: time.Now()},
+		viewport:     vp,
+		textInput:    ti,
+		spinner:      sp,
+		status:       statusReady,
+		cfg:          cfg,
+		agent:        ag,
+		registry:     registry,
+		loadedSkills: loadedSkills,
+		ollamaClient: client,
+		renderer:     renderer,
+		logger:       logger,
+		ctx:          ctx,
+		cancel:       cancel,
+		stats:        sessionStats{startedAt: time.Now()},
 	}
 }
 
@@ -272,6 +284,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = statusReady
 		}
 		m.rebuildViewport()
+
+	// ── Models list loaded ────────────────────────────────────────────────────
+	case modelsLoadedMsg:
+		m.modelsLoading = false
+		if msg.err != nil {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entryError,
+				Content: fmt.Sprintf("Could not fetch models: %v", msg.err),
+			})
+			m.rebuildViewport()
+			break
+		}
+		if len(msg.models) == 0 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "No models found. Pull one with `ollama pull <model>`.",
+			})
+			m.rebuildViewport()
+			break
+		}
+		// Run the picker as a sub-program (suspends main TUI)
+		picker := newModelsPicker(msg.models, m.width-4, m.height-4)
+		sub := tea.NewProgram(picker, tea.WithAltScreen())
+		result, err := sub.Run()
+		if err == nil {
+			if pm, ok := result.(modelsPicker); ok && pm.chosen != "" {
+				m.cfg.Model = pm.chosen
+				m.agent.Model = pm.chosen
+				m.entries = append(m.entries, ChatEntry{
+					Kind:    entrySystem,
+					Content: fmt.Sprintf("✓ Switched to **%s**", pm.chosen),
+				})
+			}
+		}
+		m.rebuildViewport()
 	}
 
 	// Always update sub-models
@@ -356,6 +403,37 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 			),
 		})
 
+	case "/models":
+		if m.modelsLoading {
+			break
+		}
+		m.modelsLoading = true
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entrySystem,
+			Content: "⟳ Fetching available models from Ollama…",
+		})
+		m.rebuildViewport()
+		return fetchModels(m.ollamaClient)
+
+	case "/skills":
+		if len(m.loadedSkills) == 0 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("No skills loaded (dir: `%s`).", m.cfg.SkillsDir),
+			})
+		} else {
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("**Loaded Skills** (%d)\n\n", len(m.loadedSkills)))
+			for _, s := range m.loadedSkills {
+				if s.Description != "" {
+					b.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
+				} else {
+					b.WriteString(fmt.Sprintf("- **%s**\n", s.Name))
+				}
+			}
+			m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
+		}
+
 	default:
 		m.entries = append(m.entries, ChatEntry{
 			Kind:    entryError,
@@ -406,6 +484,7 @@ func waitForAgentEvent(ch <-chan agent.Event) tea.Cmd {
 func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	switch ev.Kind {
 	case agent.EventToken:
+		m.tokenCount += tokens.Estimate(ev.Text)
 		m.currentResp.WriteString(ev.Text)
 		m.rebuildViewport()
 
@@ -505,6 +584,7 @@ func (m *Model) renderSidebar() string {
 		row("Model", m.cfg.Model),
 		row("Turns", fmt.Sprintf("%d", m.stats.turns)),
 		row("Tools", fmt.Sprintf("%d calls", m.stats.toolCalls)),
+		row("~Tokens", fmt.Sprintf("%d", m.tokenCount)),
 		row("Uptime", uptime.String()),
 		"",
 		SidebarTitleStyle.Render("◈ Status"),
@@ -519,7 +599,9 @@ func (m *Model) renderSidebar() string {
 		SidebarTitleStyle.Render("◈ Commands"),
 		shortcut("/help", "commands"),
 		shortcut("/model", "switch model"),
+		shortcut("/models", "browse models"),
 		shortcut("/tools", "list tools"),
+		shortcut("/skills", "list skills"),
 		shortcut("/session", "stats"),
 		shortcut("/clear", "new session"),
 	}
@@ -667,7 +749,9 @@ func helpText() string {
 		"|---------|-------------|",
 		"| `/help` | Show this help |",
 		"| `/model [name]` | Show or switch the active model |",
+		"| `/models` | Browse & select local models (interactive list) |",
 		"| `/tools` | List all available tools |",
+		"| `/skills` | List loaded skills |",
 		"| `/session` | Show session statistics |",
 		"| `/clear` | Clear history and start a new session |",
 		"",

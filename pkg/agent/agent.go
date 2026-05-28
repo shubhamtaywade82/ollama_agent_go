@@ -146,9 +146,10 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 			emit(Event{Kind: EventToolResult, Tool: name, Text: result})
 
 			msgs = append(msgs, ollama.Message{
-				Role:     "tool",
-				ToolName: name,
-				Content:  result,
+				Role:       "tool",
+				ToolName:   name,
+				ToolCallID: call.ID,
+				Content:    result,
 			})
 		}
 	}

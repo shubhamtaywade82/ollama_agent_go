@@ -34,7 +34,7 @@ Environment variables:
 
 | Variable             | Default                  | Meaning                  |
 | -------------------- | ------------------------ | ------------------------ |
-| `OLLAMA_AGENT_MODEL` | `qwen2.5-coder:latest`   | Model name               |
+| `OLLAMA_AGENT_MODEL` | `qwen.3.5:4b`   | Model name               |
 | `OLLAMA_BASE_URL`    | `http://localhost:11434` | Ollama server base URL   |
 | `OLLAMA_AGENT_ROOT`  | current working dir      | Sandbox root for tools   |
 

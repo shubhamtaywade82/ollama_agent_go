@@ -14,12 +14,17 @@ type Message struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolName labels a "tool" role message with the tool it answers.
+	// ToolName labels a "tool" role message with the tool it answers (Ollama).
 	ToolName string `json:"tool_name,omitempty"`
+	// ToolCallID links a "tool" role message to the originating call
+	// (OpenAI-style providers). Ignored by Ollama.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is a function-call request emitted by the model.
 type ToolCall struct {
+	// ID identifies the call for OpenAI-style providers. Empty for Ollama.
+	ID       string           `json:"id,omitempty"`
 	Function ToolCallFunction `json:"function"`
 }
 
@@ -43,6 +48,10 @@ type ChatResponse struct {
 	Message       Message `json:"message"`
 	Done          bool    `json:"done"`
 	TotalDuration int64   `json:"total_duration,omitempty"`
+	// Token usage. Ollama reports these as prompt_eval_count / eval_count;
+	// other providers populate them via their adapters for cost tracking.
+	PromptTokens     int `json:"prompt_eval_count,omitempty"`
+	CompletionTokens int `json:"eval_count,omitempty"`
 }
 
 type Client struct {
@@ -129,4 +138,42 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, callback func(
 	}
 
 	return scanner.Err()
+}
+
+// ModelInfo holds metadata for one local model.
+type ModelInfo struct {
+	Name       string `json:"name"`
+	ModifiedAt string `json:"modified_at"`
+	Size       int64  `json:"size"`
+	Details    struct {
+		Family            string   `json:"family"`
+		ParameterSize     string   `json:"parameter_size"`
+		QuantizationLevel string   `json:"quantization_level"`
+		Families          []string `json:"families"`
+	} `json:"details"`
+}
+
+// ListModels fetches the list of locally available Ollama models.
+func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(b))
+	}
+	var result struct {
+		Models []ModelInfo `json:"models"`
+	}
+	if err := json.Unmarshal(b, &result); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	return result.Models, nil
 }
