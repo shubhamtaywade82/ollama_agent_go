@@ -1,0 +1,25 @@
+# Binaries
+/bin/
+/ollama_agent_go
+*.exe
+*.out
+
+# Coverage
+coverage.out
+coverage.html
+
+# Go workspace / cache
+/dist/
+/.cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+.ollama_agent/
