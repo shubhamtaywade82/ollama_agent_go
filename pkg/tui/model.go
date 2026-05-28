@@ -164,6 +164,10 @@ func NewModel(cfg *config.Config) *Model {
 	}
 }
 
+// SetLogger wires an external charmbracelet/log logger (e.g. file-backed) into
+// the model so diagnostic output doesn't appear on the TUI surface.
+func (m *Model) SetLogger(l *log.Logger) { m.logger = l }
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 func (m *Model) Init() tea.Cmd {
