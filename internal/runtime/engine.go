@@ -171,8 +171,10 @@ func (e *Engine) ClearHistory(ctx context.Context) error {
 }
 
 // SetModel switches the active model name on the agent and rebuilds its system prompt.
+// It also stores the name as a ModelHint so the router can pick the right provider.
 func (e *Engine) SetModel(name string) {
 	e.Agent.Model = name
+	e.Agent.ModelHint = name
 	base := agent.SystemPrompt(e.ToolHost)
 	e.Agent.System = skills.Inject(base, e.Skills)
 }

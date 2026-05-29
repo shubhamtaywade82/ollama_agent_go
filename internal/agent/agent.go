@@ -26,6 +26,7 @@ type Agent struct {
 	Client        Chatter
 	ToolHost      *tools.Host
 	Model         string
+	ModelHint     string // optional provider-selection hint propagated to the router
 	System        string
 	MaxIterations int
 	Options       map[string]any
@@ -68,10 +69,11 @@ func (a *Agent) Run(ctx context.Context, history []types.Message, emit Emit) (st
 			return "", err
 		}
 		resp, err := a.Client.Chat(ctx, types.ChatRequest{
-			Model:    a.Model,
-			Messages: tokens.Trim(msgs, a.ContextBudget),
-			Tools:    specs,
-			Options:  a.Options,
+			Model:     a.Model,
+			ModelHint: a.ModelHint,
+			Messages:  tokens.Trim(msgs, a.ContextBudget),
+			Tools:     specs,
+			Options:   a.Options,
 		})
 		if err != nil {
 			emit(Event{Kind: EventError, Text: err.Error()})

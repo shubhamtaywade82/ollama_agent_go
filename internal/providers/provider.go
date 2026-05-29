@@ -13,8 +13,13 @@ import (
 type Provider interface {
 	Name() string
 	Chat(ctx context.Context, req types.ChatRequest) (types.ChatResponse, error)
+
+	// Capability flags
 	SupportsTools() bool
 	SupportsStreaming() bool
+	SupportsThinking() bool // extended reasoning / chain-of-thought (e.g. claude-3-7-sonnet)
+
+	// Cost metadata
 	Pricing() Pricing
 }
 
@@ -28,3 +33,4 @@ type Pricing struct {
 func (p Pricing) Cost(inputTokens, outputTokens int) float64 {
 	return float64(inputTokens)/1e6*p.InputPerM + float64(outputTokens)/1e6*p.OutputPerM
 }
+

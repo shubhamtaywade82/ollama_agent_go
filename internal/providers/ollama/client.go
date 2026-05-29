@@ -33,9 +33,10 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-func (c *Client) Name() string            { return "ollama" }
-func (c *Client) SupportsTools() bool     { return true }
-func (c *Client) SupportsStreaming() bool  { return true }
+func (c *Client) Name() string               { return "ollama" }
+func (c *Client) SupportsTools() bool        { return true }
+func (c *Client) SupportsStreaming() bool     { return true }
+func (c *Client) SupportsThinking() bool     { return false }
 func (c *Client) Pricing() providers.Pricing { return providers.Pricing{} }
 
 // Chat performs a single non-streaming chat completion.

@@ -44,6 +44,7 @@ func New(apiKey, model string) *Client {
 func (c *Client) Name() string               { return "anthropic" }
 func (c *Client) SupportsTools() bool        { return true }
 func (c *Client) SupportsStreaming() bool     { return false }
+func (c *Client) SupportsThinking() bool     { return true } // claude-3-7-sonnet+
 func (c *Client) Pricing() providers.Pricing { return c.Price }
 
 func (c *Client) httpClient() *http.Client {

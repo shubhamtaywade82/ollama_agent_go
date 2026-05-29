@@ -34,6 +34,10 @@ type ChatRequest struct {
 	Stream   bool           `json:"stream"`
 	Tools    []any          `json:"tools,omitempty"`
 	Options  map[string]any `json:"options,omitempty"`
+	// ModelHint is an optional routing hint set by the caller (e.g. "/model gpt-4").
+	// The router uses it to prefer a matching provider without overriding task-type
+	// selection when no matching provider is found.
+	ModelHint string `json:"-"`
 }
 
 // ChatResponse is the neutral response type returned by all providers.
