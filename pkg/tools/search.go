@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"ollama_agent_go/pkg/index"
 )
 
 const maxGrepMatches = 200
@@ -98,6 +100,52 @@ func (t *GrepSearch) Execute(_ context.Context, args map[string]any) (string, er
 		return "(no matches)", nil
 	}
 	return strings.Join(matches, "\n"), nil
+}
+
+// SymbolSearch uses the source indexer to find definitions (functions,
+// structs, interfaces) by name.
+type SymbolSearch struct {
+	Root    string
+	indexer *index.Indexer
+}
+
+func (t *SymbolSearch) Name() string { return "symbol_search" }
+func (t *SymbolSearch) Description() string {
+	return "Search for code symbols (functions, structs, interfaces) by name across the project."
+}
+
+func (t *SymbolSearch) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string", "description": "Symbol name or substring to search for."},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (t *SymbolSearch) Execute(_ context.Context, args map[string]any) (string, error) {
+	query, err := argString(args, "query")
+	if err != nil {
+		return "", err
+	}
+	if t.indexer == nil {
+		t.indexer = index.NewIndexer(t.Root)
+		if err := t.indexer.Scan(); err != nil {
+			return "", fmt.Errorf("indexing failed: %w", err)
+		}
+	}
+
+	matches := t.indexer.Search(query)
+	if len(matches) == 0 {
+		return "(no symbols found)", nil
+	}
+
+	var lines []string
+	for _, m := range matches {
+		lines = append(lines, m.String())
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 // skipDir reports whether a directory should be skipped during search.

@@ -26,12 +26,17 @@ type Config struct {
 	// MaxIterations caps the think-act loop iterations per request.
 	// Env: OLLAMA_AGENT_MAX_ITER, defaults to 12.
 	MaxIterations int
+
+	// Provider API Keys
+	OpenAIKey    string
+	AnthropicKey string
+	GroqKey      string
 }
 
 func Load() *Config {
 	model := os.Getenv("OLLAMA_AGENT_MODEL")
 	if model == "" {
-		model = "qwen3.5:4b"
+		model = "qwen2.5:3b"
 	}
 
 	baseURL := os.Getenv("OLLAMA_BASE_URL")
@@ -75,5 +80,8 @@ func Load() *Config {
 		SkillsDir:     skillsDir,
 		ContextBudget: budget,
 		MaxIterations: maxIter,
+		OpenAIKey:     os.Getenv("OPENAI_API_KEY"),
+		AnthropicKey:  os.Getenv("ANTHROPIC_API_KEY"),
+		GroqKey:       os.Getenv("GROQ_API_KEY"),
 	}
 }

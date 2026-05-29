@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 
+	"ollama_agent_go/pkg/kernel"
 	"ollama_agent_go/pkg/ollama"
+	"ollama_agent_go/pkg/provider"
 	"ollama_agent_go/pkg/tokens"
 	"ollama_agent_go/pkg/tools"
 )
@@ -63,6 +65,7 @@ type ToolRunner interface {
 type Agent struct {
 	Client        Chatter
 	Registry      ToolRunner
+	Kernel        *kernel.Kernel
 	Model         string
 	System        string
 	MaxIterations int
@@ -103,6 +106,11 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 
 	specs := toAnySpecs(a.Registry.Specs())
 
+	var saga *kernel.Saga
+	if a.Kernel != nil {
+		saga = a.Kernel.Coordinator.Begin()
+	}
+
 	for iter := 0; iter < maxIters; iter++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -116,6 +124,16 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 		if err != nil {
 			emit(Event{Kind: EventError, Text: err.Error()})
 			return "", err
+		}
+
+		if a.Kernel != nil {
+			if p, ok := a.Client.(provider.Provider); ok {
+				_ = a.Kernel.RecordCost(p, resp)
+			} else if r, ok := a.Client.(*provider.Router); ok {
+				if active, ok := r.Get(r.ActiveName()); ok {
+					_ = a.Kernel.RecordCost(active, resp)
+				}
+			}
 		}
 
 		msg := resp.Message
@@ -147,7 +165,29 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 			args := call.Function.Arguments
 			emit(Event{Kind: EventToolCall, Tool: name, Args: args})
 
-			out, execErr := a.Registry.Execute(ctx, name, args)
+			var out string
+			var execErr error
+
+			if a.Kernel != nil && saga != nil && isMutationTool(name) {
+				path, _ := args["path"].(string)
+				if !a.Kernel.IsAllowed(path) {
+					execErr = fmt.Errorf("access to %q is restricted by ownership policy", path)
+				} else {
+					kind := toMutationKind(name)
+					execErr = a.Kernel.Coordinator.Apply(saga, path, kind, func() error {
+						var err error
+						out, err = a.Registry.Execute(ctx, name, args)
+						return err
+					})
+					// Record mutation in DB
+					if len(saga.Mutations) > 0 {
+						_ = a.Kernel.RecordMutation(saga.Mutations[len(saga.Mutations)-1], path, string(kind), execErr == nil)
+					}
+				}
+			} else {
+				out, execErr = a.Registry.Execute(ctx, name, args)
+			}
+
 			result := out
 			if execErr != nil {
 				result = "Error: " + execErr.Error()
@@ -166,6 +206,25 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message, emit Emit) (s
 	err := fmt.Errorf("reached max iterations (%d) without a final answer", maxIters)
 	emit(Event{Kind: EventError, Text: err.Error()})
 	return "", err
+}
+
+func isMutationTool(name string) bool {
+	switch name {
+	case "write_file", "edit_file", "run_shell":
+		return true
+	}
+	return false
+}
+
+func toMutationKind(name string) kernel.MutationKind {
+	switch name {
+	case "write_file":
+		return kernel.MutationWrite
+	case "edit_file":
+		return kernel.MutationEdit
+	default:
+		return kernel.MutationWrite // default for run_shell which is unpredictable
+	}
 }
 
 // toAnySpecs converts typed specs to the []any the request expects.

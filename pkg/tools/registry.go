@@ -106,5 +106,7 @@ func Default(root string) *Registry {
 	r.Register(&GrepSearch{Root: root})
 	r.Register(&RunShell{Root: root})
 	r.Register(&EditFile{Root: root})
+	r.Register(&SymbolSearch{Root: root})
+	r.Register(&Delegate{})
 	return r
 }

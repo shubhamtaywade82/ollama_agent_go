@@ -16,7 +16,9 @@ import (
 	"github.com/charmbracelet/log"
 	"ollama_agent_go/pkg/agent"
 	"ollama_agent_go/pkg/config"
+	"ollama_agent_go/pkg/kernel"
 	"ollama_agent_go/pkg/ollama"
+	"ollama_agent_go/pkg/provider"
 	"ollama_agent_go/pkg/skills"
 	"ollama_agent_go/pkg/tokens"
 	"ollama_agent_go/pkg/tools"
@@ -95,8 +97,10 @@ type Model struct {
 	cfg          *config.Config
 	agent        *agent.Agent
 	registry     agent.ToolRunner
+	kernel       *kernel.Kernel
 	loadedSkills []skills.Skill // skills injected into the system prompt
-	ollamaClient  *ollama.Client
+	router       *provider.Router
+	ollamaClient *ollama.Client
 
 	// Context for cancellable runs
 	ctx    context.Context
@@ -153,9 +157,27 @@ func NewModel(cfg *config.Config) *Model {
 		})
 	}
 
-	// Ollama client + agent
+	// Router + Providers
+	router := provider.NewRouter()
+	router.Add(provider.NewOllama(cfg.BaseURL, cfg.Model))
+	if cfg.OpenAIKey != "" {
+		router.Add(provider.NewOpenAI(cfg.OpenAIKey, "gpt-4o"))
+	}
+	if cfg.AnthropicKey != "" {
+		router.Add(provider.NewAnthropic(cfg.AnthropicKey, "claude-3-5-sonnet-20240620"))
+	}
+	if cfg.GroqKey != "" {
+		router.Add(provider.NewGroq(cfg.GroqKey, "llama3-70b-8192"))
+	}
+
+	// Kernel
+	k, _ := kernel.New(cfg.Root)
+
+	// Ollama client (kept for /models list)
 	client := ollama.NewClient(cfg.BaseURL)
-	ag := agent.New(client, registry, cfg.Model)
+
+	ag := agent.New(router, registry, cfg.Model)
+	ag.Kernel = k
 	ag.ContextBudget = cfg.ContextBudget
 	ag.MaxIterations = cfg.MaxIterations
 	// Inject optional Markdown skills into the system prompt.
@@ -175,7 +197,9 @@ func NewModel(cfg *config.Config) *Model {
 		cfg:          cfg,
 		agent:        ag,
 		registry:     registry,
+		kernel:       k,
 		loadedSkills: loadedSkills,
+		router:       router,
 		ollamaClient: client,
 		renderer:     renderer,
 		logger:       logger,
@@ -403,12 +427,56 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 		m.entries = append(m.entries, ChatEntry{
 			Kind: entrySystem,
 			Content: fmt.Sprintf(
-				"**Session Info**\n\n- Model: `%s`\n- Root: `%s`\n- Turns: %d\n- Tool calls: %d\n- Uptime: %s",
+				"**Session Info**\n\n- Provider: `%s`\n- Model: `%s`\n- Root: `%s`\n- Turns: %d\n- Tool calls: %d\n- Uptime: %s",
+				m.router.ActiveName(),
 				m.cfg.Model,
 				m.cfg.Root,
 				m.stats.turns,
 				m.stats.toolCalls,
 				time.Since(m.stats.startedAt).Round(time.Second),
+			),
+		})
+
+	case "/provider":
+		if len(parts) > 1 {
+			name := parts[1]
+			if err := m.router.SetActive(name); err != nil {
+				m.entries = append(m.entries, ChatEntry{
+					Kind:    entryError,
+					Content: fmt.Sprintf("Error: %v", err),
+				})
+			} else {
+				m.entries = append(m.entries, ChatEntry{
+					Kind:    entrySystem,
+					Content: fmt.Sprintf("✓ Switched to provider **%s**", name),
+				})
+			}
+		} else {
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("Active provider: **%s**\n\n", m.router.ActiveName()))
+			b.WriteString("Available providers:\n")
+			for _, name := range m.router.Names() {
+				if name == m.router.ActiveName() {
+					b.WriteString(fmt.Sprintf("- **%s** (active)\n", name))
+				} else {
+					b.WriteString(fmt.Sprintf("- %s\n", name))
+				}
+			}
+			b.WriteString("\nUsage: `/provider <name>`")
+			m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
+		}
+
+	case "/config":
+		m.entries = append(m.entries, ChatEntry{
+			Kind: entrySystem,
+			Content: fmt.Sprintf(
+				"**Configuration**\n\n- Model: `%s`\n- Base URL: `%s`\n- Root: `%s`\n- Context Budget: %d tokens\n- Max Iterations: %d\n- Skills Dir: `%s`",
+				m.cfg.Model,
+				m.cfg.BaseURL,
+				m.cfg.Root,
+				m.cfg.ContextBudget,
+				m.cfg.MaxIterations,
+				m.cfg.SkillsDir,
 			),
 		})
 
@@ -587,13 +655,19 @@ func (m *Model) renderChat(width int) string {
 
 func (m *Model) renderSidebar() string {
 	uptime := time.Since(m.stats.startedAt).Round(time.Second)
+	cost := 0.0
+	if m.kernel != nil {
+		cost, _ = m.kernel.GetTotalCost()
+	}
 
 	rows := []string{
 		SidebarTitleStyle.Render("◈ Session"),
+		row("Provider", m.router.ActiveName()),
 		row("Model", m.cfg.Model),
 		row("Turns", fmt.Sprintf("%d", m.stats.turns)),
 		row("Tools", fmt.Sprintf("%d calls", m.stats.toolCalls)),
 		row("~Tokens", fmt.Sprintf("%d", m.tokenCount)),
+		row("Cost", fmt.Sprintf("$%.4f", cost)),
 		row("Uptime", uptime.String()),
 		"",
 		SidebarTitleStyle.Render("◈ Status"),
@@ -758,10 +832,12 @@ func helpText() string {
 		"|---------|-------------|",
 		"| `/help` | Show this help |",
 		"| `/model [name]` | Show or switch the active model |",
+		"| `/provider [name]` | Show or switch the active provider |",
 		"| `/models` | Browse & select local models (interactive list) |",
 		"| `/tools` | List all available tools |",
 		"| `/skills` | List loaded skills |",
 		"| `/session` | Show session statistics |",
+		"| `/config` | Show current configuration |",
 		"| `/clear` | Clear history and start a new session |",
 		"",
 		"**Keyboard Shortcuts**",
