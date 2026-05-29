@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"ollama_agent_go/internal/agent/roles"
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
+	"ollama_agent_go/internal/orchestration"
 	"ollama_agent_go/internal/providers/router"
 	"ollama_agent_go/internal/reliability"
 	"ollama_agent_go/internal/retriever"
@@ -104,6 +106,10 @@ type Engine struct {
 
 	// Agent role selector — nil means always use e.Agent directly
 	Selector *agent.Selector
+
+	// Orchestrator — optional; used for multi-step goal decomposition.
+	// Set by bootstrap when orchestration is enabled.
+	Orchestrator *orchestration.Orchestrator
 
 	session *Session // current in-memory session
 }
@@ -223,16 +229,6 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		}
 	}
 
-	// Select the right agent for this input.
-	ag := e.Agent
-	if e.Selector != nil {
-		ag = e.Selector.Select(input)
-	}
-
-	// Wire HITL interrupt check into the selected agent loop for this run.
-	ag.InterruptCheck = func() bool { return e.checkHITL(ctx) }
-	defer func() { ag.InterruptCheck = nil }()
-
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
 		if emit != nil {
@@ -241,7 +237,25 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		e.Bus.Publish(BusEvent{Name: "agent.event", Payload: ev})
 	}
 
-	result, err := ag.Run(ctx, e.Memory.Short().Messages(), wrapped)
+	var result string
+	var err error
+
+	// Use orchestrator for complex multi-step goals when available.
+	if e.Orchestrator != nil && isComplexGoal(input) {
+		result, err = e.Orchestrator.Run(ctx, input, wrapped)
+	} else {
+		// Select the right agent for this input.
+		ag := e.Agent
+		if e.Selector != nil {
+			ag = e.Selector.Select(input)
+		}
+
+		// Wire HITL interrupt check into the selected agent loop for this run.
+		ag.InterruptCheck = func() bool { return e.checkHITL(ctx) }
+		defer func() { ag.InterruptCheck = nil }()
+
+		result, err = ag.Run(ctx, e.Memory.Short().Messages(), wrapped)
+	}
 
 	if err != nil {
 		_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateFailed)
@@ -365,4 +379,29 @@ func (e *Engine) ExportAudit(ctx context.Context) ([]observability.AuditEvent, e
 // MetricsSnapshot returns a point-in-time snapshot of all counters.
 func (e *Engine) MetricsSnapshot() observability.MetricsSnapshot {
 	return e.Obs.Metrics().Snapshot()
+}
+
+// Plan decomposes goal into a task graph and returns a human-readable preview.
+// Returns an error if no Orchestrator is wired.
+func (e *Engine) Plan(ctx context.Context, goal string) (string, error) {
+	if e.Orchestrator == nil {
+		return "", fmt.Errorf("orchestration not enabled")
+	}
+	return e.Orchestrator.Preview(ctx, goal)
+}
+
+// isComplexGoal returns true for inputs that benefit from multi-step orchestration:
+// multiple sentences, explicit sequencing words, or long goals (>200 chars).
+func isComplexGoal(input string) bool {
+	if len(input) > 200 {
+		return true
+	}
+	lower := strings.ToLower(input)
+	sequencers := []string{"and then", "after that", "first ", "next ", "finally ", "then ", "step 1", "step 2"}
+	for _, s := range sequencers {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
 }

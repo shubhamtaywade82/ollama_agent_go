@@ -30,6 +30,12 @@ func (r Role) String() string {
 	}
 }
 
+// ParseRoleString converts a string to a Role, returning RoleGeneral on unknown values.
+func ParseRoleString(s string) Role {
+	r, _ := ParseRole(s)
+	return r
+}
+
 // ParseRole converts a string to a Role (case-insensitive).
 func ParseRole(s string) (Role, bool) {
 	switch s {

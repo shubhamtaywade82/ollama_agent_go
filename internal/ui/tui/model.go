@@ -451,10 +451,31 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 			} else {
 				msg = fmt.Sprintf("✓ Indexed `%s`", d)
 			}
-			_ = msg // TUI can't easily receive async messages here without a channel;
-			// result visible in the log file
+			_ = msg // result visible in the log file
 		}(m.ctx, dir)
 		return nil
+
+	case "/plan":
+		if len(parts) < 2 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/plan <goal>` — decompose a goal into sub-tasks (preview only)",
+			})
+			break
+		}
+		goal := strings.Join(parts[1:], " ")
+		preview, err := m.engine.Plan(m.ctx, goal)
+		if err != nil {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entryError,
+				Content: fmt.Sprintf("Plan error: %v", err),
+			})
+		} else {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: preview,
+			})
+		}
 
 	default:
 		m.entries = append(m.entries, ChatEntry{
@@ -619,6 +640,8 @@ func (m *Model) renderSidebar() string {
 		shortcut("/session", "stats"),
 		shortcut("/audit", "audit log"),
 		shortcut("/metrics", "counters"),
+		shortcut("/agent", "set role"),
+		shortcut("/plan", "preview plan"),
 		shortcut("/clear", "new session"),
 	}
 
@@ -761,6 +784,8 @@ func helpText() string {
 		"| `/audit [n]` | Show last N audit events (default 10) |",
 		"| `/metrics` | Show call counters and token totals |",
 		"| `/index <dir>` | Index a directory into the knowledge base |",
+		"| `/agent <role>` | Pin agent role (research/reasoning/action/data/communication/reset) |",
+		"| `/plan <goal>` | Decompose a goal into a task plan (preview, no execution) |",
 		"| `/clear` | Clear history and start a new session |",
 		"",
 		"**Keyboard Shortcuts**",

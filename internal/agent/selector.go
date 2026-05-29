@@ -43,6 +43,12 @@ func (s *Selector) Select(input string) *Agent {
 	return s.agentFor(detectRole(input))
 }
 
+// SelectRole returns the agent configured for the given role directly.
+// Falls back to the General agent if the role is not registered.
+func (s *Selector) SelectRole(role roles.Role) *Agent {
+	return s.agentFor(role)
+}
+
 // Pin locks the selector to role for all subsequent Select calls.
 // Use RoleGeneral to reset to auto-select.
 func (s *Selector) Pin(role roles.Role) {

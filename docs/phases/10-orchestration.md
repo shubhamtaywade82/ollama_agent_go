@@ -1,6 +1,6 @@
 # Phase 10 — Orchestration / Workflow Engine
 
-Tags: `#orchestration` `#workflow` `#tasks` `#decomposition` `#dag` `#scheduling` `#planner` `#p2` `#status/planned`
+Tags: `#orchestration` `#workflow` `#tasks` `#decomposition` `#dag` `#scheduling` `#planner` `#p2` `#status/done`
 
 Prerequisites: Phase 09 (agent roles + selector), Phase 06 (reliability/retry), Phase 03 (saga).
 
