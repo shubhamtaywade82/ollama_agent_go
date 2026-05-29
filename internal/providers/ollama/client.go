@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"ollama_agent_go/internal/providers"
 	"ollama_agent_go/internal/types"
@@ -29,7 +30,7 @@ func NewClient(baseURL, model string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		Model:      model,
-		HTTPClient: &http.Client{},
+		HTTPClient: &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 

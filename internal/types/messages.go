@@ -9,8 +9,9 @@ type Message struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolName labels a "tool" role message with the tool it answers (Ollama).
-	ToolName string `json:"tool_name,omitempty"`
+	// ToolName labels a "tool" role message with the tool it answers.
+	// Ollama expects the key "name" (not "tool_name") in tool-role messages.
+	ToolName string `json:"name,omitempty"`
 	// ToolCallID links a "tool" role message to the originating call (OpenAI-style).
 	ToolCallID string `json:"tool_call_id,omitempty"`
 }
