@@ -202,21 +202,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		sidebarW := 28
-		chatW := m.width - sidebarW - 2
-		if chatW < 20 {
-			chatW = 20
-			sidebarW = 0
+		// Chat content width depends on whether the sidebar is shown. The exact
+		// viewport dimensions are resolved per-render in View via computeLayout;
+		// here we only keep the markdown wrap width and input width in sync.
+		chatW := m.width - chatBorder
+		if m.width >= minWidthForSidebar {
+			chatW = m.width - sidebarOuterW - layoutGap - chatBorder
 		}
-		_ = sidebarW
-		m.viewport.Width = chatW
-		m.viewport.Height = m.height - 7
-		m.textInput.Width = chatW - 4
-		m.comp.SetWidth(chatW - 4)
+		if chatW < 10 {
+			chatW = 10
+		}
+		m.textInput.Width = chatW
+		m.comp.SetWidth(chatW)
 		if m.renderer != nil {
 			m.renderer, _ = glamour.NewTermRenderer(
 				glamour.WithStandardStyle("dark"),
-				glamour.WithWordWrap(chatW-4),
+				glamour.WithWordWrap(chatW),
 			)
 		}
 		m.rebuildViewport()
@@ -292,8 +293,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentDone:
 		m.eventCh = nil
 		if m.currentResp.Len() > 0 {
-			rendered := m.renderMarkdown(m.currentResp.String())
-			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: rendered})
+			// Store raw markdown; renderEntry renders it at the current wrap
+			// width so the message re-wraps when the window is resized.
+			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: m.currentResp.String()})
 			m.currentResp.Reset()
 		}
 		if msg.err != nil {
@@ -648,8 +650,9 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 
 	case agent.EventToolCall:
 		if m.currentResp.Len() > 0 {
-			rendered := m.renderMarkdown(m.currentResp.String())
-			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: rendered})
+			// Store raw markdown; renderEntry renders it at the current wrap
+			// width so the message re-wraps when the window is resized.
+			m.entries = append(m.entries, ChatEntry{Kind: entryAgent, Content: m.currentResp.String()})
 			m.currentResp.Reset()
 		}
 		m.stats.toolCalls++
@@ -696,23 +699,40 @@ func (m *Model) View() string {
 		return "Initializing…"
 	}
 
-	sidebarW := 28
-	chatW := m.width - sidebarW - 2
-	if chatW < 30 {
-		return m.singleColumnView()
+	// MaxWidth truncates the header so a long subtitle never widens the frame
+	// past the window on narrow terminals.
+	header := lipgloss.NewStyle().MaxWidth(m.width).Render(m.renderHeader())
+	statusBar := m.renderStatusBar()
+	sidebar := m.renderSidebar()
+
+	var dropdown string
+	if m.comp.Visible() {
+		dropdown = m.comp.View()
 	}
 
-	header := m.renderHeader()
-	chat := m.renderChat(chatW)
-	sidebar := m.renderSidebar()
-	input := m.renderInput(chatW)
-	statusBar := m.renderStatusBar()
+	// Budget the vertical space taken by everything but the chat body, then size
+	// the chat box to fill the remainder so the frame is exactly m.height tall.
+	chromeH := lipgloss.Height(header) + lipgloss.Height(statusBar) + inputBoxHeight
+	if dropdown != "" {
+		chromeH += lipgloss.Height(dropdown)
+	}
+	l := computeLayout(m.width, m.height, chromeH, lipgloss.Height(sidebar))
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, chat, "  ", sidebar)
+	m.viewport.Width = l.viewportW
+	m.viewport.Height = l.viewportH
+	chat := ViewportStyle.Width(l.viewportW).Render(m.viewport.View())
+	input := m.renderInput(l.viewportW)
+
+	body := chat
+	if !l.single {
+		// Never let the sidebar exceed the chat body height.
+		sidebar = capLines(sidebar, l.viewportH+chatBorder)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, chat, "  ", sidebar)
+	}
 
 	parts := []string{header, body}
-	if m.comp.Visible() {
-		parts = append(parts, m.comp.View())
+	if dropdown != "" {
+		parts = append(parts, dropdown)
 	}
 	parts = append(parts, input, statusBar)
 
@@ -723,11 +743,6 @@ func (m *Model) renderHeader() string {
 	title := TitleStyle.Render("⬡ OLLAMA AGENT")
 	sub := SubtitleStyle.Render(fmt.Sprintf(" go-powered terminal intelligence • model: %s", m.engine.Model()))
 	return lipgloss.JoinHorizontal(lipgloss.Center, title, sub) + "\n"
-}
-
-func (m *Model) renderChat(width int) string {
-	m.viewport.Width = width
-	return ViewportStyle.Width(width).Render(m.viewport.View())
 }
 
 func (m *Model) renderSidebar() string {
@@ -800,15 +815,6 @@ func (m *Model) renderStatusBar() string {
 	return StatusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
 }
 
-func (m *Model) singleColumnView() string {
-	return fmt.Sprintf("%s\n%s\n%s\n%s",
-		TitleStyle.Render("⬡ OLLAMA AGENT"),
-		m.viewport.View(),
-		"› "+m.textInput.View(),
-		HelpStyle.Render("ctrl+c quit"),
-	)
-}
-
 // ── Viewport rendering ────────────────────────────────────────────────────────
 
 func (m *Model) rebuildViewport() {
@@ -833,7 +839,7 @@ func (m *Model) renderEntry(e ChatEntry) string {
 		return UserLabelStyle.Render("YOU ›") + " " + e.Content
 
 	case entryAgent:
-		return AgentLabelStyle.Render("AGENT ›") + "\n" + e.Content
+		return AgentLabelStyle.Render("AGENT ›") + "\n" + m.renderMarkdown(e.Content)
 
 	case entryToolCall:
 		label := ToolCallLabelStyle.Render(fmt.Sprintf("⚙ TOOL › %s", e.Tool))
