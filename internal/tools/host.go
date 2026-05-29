@@ -72,13 +72,40 @@ func (h *Host) Execute(ctx context.Context, name string, args map[string]any) (s
 		if isMutating && h.Saga != nil {
 			_ = h.Saga.Transition(ctx, mutID, storage.SagaRolledBack, nil)
 		}
+		h.Obs.Metrics().IncrToolCall(name, false)
+		_ = h.Obs.Audit().Log(ctx, observability.AuditEvent{
+			SessionID: h.SessionID,
+			Actor:     "system",
+			Action:    "tool_call",
+			Resource:  name,
+			Result:    "denied",
+		})
 		return "", fmt.Errorf("tool %q was denied", name)
 	}
+
+	// Span wraps the actual tool execution.
+	ctx, span := h.Obs.Tracer().Start(ctx, observability.SpanToolCall, h.SessionID)
+	span.Tool = name
 
 	start := time.Now()
 	out, err := h.Registry.Execute(ctx, name, args)
 	dur := time.Since(start)
+
+	h.Obs.Tracer().Finish(ctx, span, err)
 	h.Obs.RecordToolCall(h.SessionID, name, dur, err)
+	h.Obs.Metrics().IncrToolCall(name, err == nil)
+
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	_ = h.Obs.Audit().Log(ctx, observability.AuditEvent{
+		SessionID: h.SessionID,
+		Actor:     "agent",
+		Action:    "tool_call",
+		Resource:  name,
+		Result:    result,
+	})
 
 	if isMutating && h.Saga != nil {
 		if err != nil {

@@ -1,6 +1,6 @@
 # Phase 05 — Observability + Audit
 
-Tags: `#observability` `#tracing` `#spans` `#metrics` `#audit` `#sqlite` `#p1` `#status/planned`
+Tags: `#observability` `#tracing` `#spans` `#metrics` `#audit` `#sqlite` `#p1` `#status/done`
 
 Prerequisites: Phase 01 (Logger interface, storage), Phase 03 (saga for mutation audit).
 

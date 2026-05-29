@@ -29,20 +29,24 @@ type App struct {
 // logWriter may be nil (output is discarded). It is the caller's responsibility
 // to close logWriter after the app shuts down.
 func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
-	// Observability
-	var obs observability.Logger
-	if logWriter != nil {
-		obs = observability.NewFileLogger(logWriter)
-	} else {
-		obs = observability.Discard
-	}
-
-	// Storage
+	// Storage (opened before observability so we can wire tracer + audit)
 	db, err := sqstore.Open(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
 	store := sqstore.NewStore(db)
+
+	// Observability — FileLogger wired with SQLite tracer + audit + in-memory metrics
+	var obs observability.Logger
+	if logWriter != nil {
+		fl := observability.NewFileLogger(logWriter)
+		fl.WithTracer(sqstore.NewTracer(db.Underlying()))
+		fl.WithAudit(sqstore.NewAuditLogger(db.Underlying()))
+		fl.WithMetrics(observability.NewInMemoryMetrics())
+		obs = fl
+	} else {
+		obs = observability.Discard
+	}
 
 	// Policy engine
 	noApproval := os.Getenv("OLLAMA_AGENT_NO_APPROVAL") == "1"

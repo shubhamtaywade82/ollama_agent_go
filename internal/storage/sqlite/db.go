@@ -115,4 +115,34 @@ CREATE TABLE IF NOT EXISTS mutations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mutations_session ON mutations(session_id, status);
+
+CREATE TABLE IF NOT EXISTS spans (
+    id          TEXT PRIMARY KEY,
+    parent_id   TEXT,
+    session_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    model       TEXT,
+    tool        TEXT,
+    step        INTEGER,
+    duration_ms INTEGER,
+    tokens      INTEGER,
+    error       TEXT,
+    started_at  DATETIME NOT NULL,
+    ended_at    DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    resource   TEXT,
+    result     TEXT NOT NULL,
+    detail     TEXT,
+    at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
 `

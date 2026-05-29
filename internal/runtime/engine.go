@@ -77,6 +77,13 @@ func (e *Engine) Init(ctx context.Context) error {
 	e.Memory.Short().Reset()
 	e.ToolHost.SessionID = id
 	e.Obs.Info("session started", "id", id, "model", e.Agent.Model)
+	_ = e.Obs.Audit().Log(ctx, observability.AuditEvent{
+		SessionID: id,
+		Actor:     "system",
+		Action:    "session_start",
+		Resource:  e.Agent.Model,
+		Result:    "ok",
+	})
 	return nil
 }
 
@@ -95,12 +102,25 @@ func (e *Engine) Conversation() []types.Message {
 
 // Submit accepts user input, runs the agent, and persists results.
 // It blocks until the run completes. Events stream to the caller via emit.
-func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) error {
+func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (retErr error) {
 	if e.session == nil {
 		if err := e.Init(ctx); err != nil {
 			return err
 		}
 	}
+
+	// Span wraps the entire agent turn so child spans (tool calls) nest correctly.
+	ctx, span := e.Obs.Tracer().Start(ctx, observability.SpanAgentTurn, e.session.ID)
+	defer func() { e.Obs.Tracer().Finish(ctx, span, retErr) }()
+
+	// Audit: session turn started
+	_ = e.Obs.Audit().Log(ctx, observability.AuditEvent{
+		SessionID: e.session.ID,
+		Actor:     "user",
+		Action:    "submit",
+		Resource:  e.Agent.Model,
+		Result:    "ok",
+	})
 
 	userMsg := types.Message{Role: "user", Content: input}
 	e.Memory.Short().Append(userMsg)
@@ -167,6 +187,12 @@ func (e *Engine) ClearHistory(ctx context.Context) error {
 	e.Memory.Short().Reset()
 	e.ToolHost.SessionID = id
 	e.Obs.Info("session cleared", "new_id", id)
+	_ = e.Obs.Audit().Log(ctx, observability.AuditEvent{
+		SessionID: id,
+		Actor:     "user",
+		Action:    "session_clear",
+		Result:    "ok",
+	})
 	return nil
 }
 
@@ -190,3 +216,24 @@ func (e *Engine) GetTool(name string) (tools.Tool, bool) { return e.ToolHost.Get
 
 // LoadedSkills returns the skills loaded into the agent.
 func (e *Engine) LoadedSkills() []skills.Skill { return e.Skills }
+
+// ExportTrace returns all spans recorded for the current session.
+func (e *Engine) ExportTrace(ctx context.Context) ([]observability.Span, error) {
+	if e.session == nil {
+		return nil, nil
+	}
+	return e.Obs.Tracer().Export(ctx, e.session.ID)
+}
+
+// ExportAudit returns all audit events for the current session.
+func (e *Engine) ExportAudit(ctx context.Context) ([]observability.AuditEvent, error) {
+	if e.session == nil {
+		return nil, nil
+	}
+	return e.Obs.Audit().Query(ctx, e.session.ID)
+}
+
+// MetricsSnapshot returns a point-in-time snapshot of all counters.
+func (e *Engine) MetricsSnapshot() observability.MetricsSnapshot {
+	return e.Obs.Metrics().Snapshot()
+}

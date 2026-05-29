@@ -368,6 +368,49 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 			m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
 		}
 
+	case "/audit":
+		n := 10
+		if len(parts) > 1 {
+			fmt.Sscanf(parts[1], "%d", &n)
+		}
+		events, err := m.engine.ExportAudit(m.ctx)
+		if err != nil {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entryError,
+				Content: fmt.Sprintf("Audit query failed: %v", err),
+			})
+			break
+		}
+		if len(events) == 0 {
+			m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: "No audit events for this session."})
+			break
+		}
+		if len(events) > n {
+			events = events[len(events)-n:]
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("**Audit Log** (last %d events)\n\n", len(events)))
+		for _, ev := range events {
+			ts := ev.At.Format("15:04:05")
+			b.WriteString(fmt.Sprintf("- `%s` [%s] **%s** %s → %s\n",
+				ts, ev.Actor, ev.Action, ev.Resource, ev.Result))
+		}
+		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
+
+	case "/metrics":
+		snap := m.engine.MetricsSnapshot()
+		var b strings.Builder
+		b.WriteString("**Metrics Snapshot**\n\n")
+		b.WriteString(fmt.Sprintf("- Total tokens: %d\n", snap.TotalTokens))
+		b.WriteString(fmt.Sprintf("- Total errors: %d\n", snap.Errors))
+		if len(snap.ToolCalls) > 0 {
+			b.WriteString("\n**Tool Calls**\n\n")
+			for tool, stats := range snap.ToolCalls {
+				b.WriteString(fmt.Sprintf("- %s: %d calls, %d errors\n", tool, stats.Total, stats.Errors))
+			}
+		}
+		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
+
 	default:
 		m.entries = append(m.entries, ChatEntry{
 			Kind:    entryError,
@@ -529,6 +572,8 @@ func (m *Model) renderSidebar() string {
 		shortcut("/tools", "list tools"),
 		shortcut("/skills", "list skills"),
 		shortcut("/session", "stats"),
+		shortcut("/audit", "audit log"),
+		shortcut("/metrics", "counters"),
 		shortcut("/clear", "new session"),
 	}
 
@@ -668,6 +713,8 @@ func helpText() string {
 		"| `/tools` | List all available tools |",
 		"| `/skills` | List loaded skills |",
 		"| `/session` | Show session statistics |",
+		"| `/audit [n]` | Show last N audit events (default 10) |",
+		"| `/metrics` | Show call counters and token totals |",
 		"| `/clear` | Clear history and start a new session |",
 		"",
 		"**Keyboard Shortcuts**",
