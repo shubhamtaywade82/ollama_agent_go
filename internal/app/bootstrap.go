@@ -1,0 +1,83 @@
+// Package app wires all internal packages into a runnable application.
+package app
+
+import (
+	"fmt"
+	"io"
+	"os"
+
+	"ollama_agent_go/internal/agent"
+	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/memory"
+	"ollama_agent_go/internal/observability"
+	"ollama_agent_go/internal/policy"
+	"ollama_agent_go/internal/providers/ollama"
+	"ollama_agent_go/internal/providers/router"
+	"ollama_agent_go/internal/runtime"
+	"ollama_agent_go/internal/skills"
+	sqstore "ollama_agent_go/internal/storage/sqlite"
+	"ollama_agent_go/internal/tools"
+)
+
+// App holds the fully wired application components.
+type App struct {
+	Engine *runtime.Engine
+	Config *config.Config
+}
+
+// New wires all internal packages and returns a ready-to-run App.
+// logWriter may be nil (output is discarded). It is the caller's responsibility
+// to close logWriter after the app shuts down.
+func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
+	// Observability
+	var obs observability.Logger
+	if logWriter != nil {
+		obs = observability.NewFileLogger(logWriter)
+	} else {
+		obs = observability.Discard
+	}
+
+	// Storage
+	db, err := sqstore.Open(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("open storage: %w", err)
+	}
+	store := sqstore.NewStore(db)
+
+	// Policy engine
+	noApproval := os.Getenv("OLLAMA_AGENT_NO_APPROVAL") == "1"
+	gatedTools := []string{"write_file", "run_shell", "edit_file"}
+	pol := policy.NewDefaultEngine(cfg.Root, gatedTools, noApproval)
+
+	// Tool registry → Host
+	reg := tools.Default(cfg.Root)
+	host := tools.NewHost(reg, pol, obs)
+
+	// Provider router (Ollama only; cloud providers added via env vars later)
+	ollamaClient := ollama.NewClient(cfg.BaseURL, cfg.Model)
+	r := router.New()
+	r.Add(ollamaClient)
+
+	// Skills
+	loadedSkills, _ := skills.Load(cfg.SkillsDir)
+
+	// Agent
+	ag := agent.New(ollamaClient, host, cfg.Model)
+	ag.ContextBudget = cfg.ContextBudget
+	ag.MaxIterations = cfg.MaxIterations
+	ag.System = skills.Inject(agent.SystemPrompt(host), loadedSkills)
+
+	// Memory manager (short-term rolling window + SQLite episodic/profile)
+	mem := memory.New(
+		cfg.ContextBudget,
+		nil, // longterm: Phase 08 (RAG) — no-op stub for now
+		sqstore.NewEpisodicStore(db),
+		sqstore.NewProfileStore(db),
+	)
+
+	// Runtime engine
+	bus := runtime.NewInProcBus()
+	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills, mem)
+
+	return &App{Engine: engine, Config: cfg}, nil
+}
