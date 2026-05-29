@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"ollama_agent_go/internal/app"
 	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/mcp"
 	ollamaprovider "ollama_agent_go/internal/providers/ollama"
 	tui "ollama_agent_go/internal/ui/tui"
 )
@@ -29,10 +31,21 @@ func main() {
 		}
 	}()
 
-	application, err := app.New(cfg, logFile)
+	ctx := context.Background()
+	application, err := app.NewWithContext(ctx, cfg, logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "startup error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// MCP server mode: expose our tools over stdio instead of launching TUI.
+	if cfg.MCPServerMode {
+		srv := mcp.NewServer(application.Engine.ToolHost, "ollama-agent", "1.0")
+		if err := srv.ServeStdio(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Register the TUI approval callback with the policy engine after the app

@@ -1,6 +1,6 @@
 # Phase 07 — MCP Protocol
 
-Tags: `#mcp` `#protocol` `#tools` `#integration` `#external` `#stdio` `#http` `#p2` `#status/planned`
+Tags: `#mcp` `#protocol` `#tools` `#integration` `#external` `#stdio` `#http` `#p2` `#status/done`
 
 Prerequisites: Phase 01 (tools.Host, registry), Phase 05 (observability spans).
 

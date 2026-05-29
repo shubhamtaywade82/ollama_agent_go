@@ -55,3 +55,4 @@ Thumbs.db
 
 # Local runtime data
 .ollama_agent/
+mcp.json

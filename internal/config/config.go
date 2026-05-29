@@ -2,10 +2,20 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 )
+
+// MCPServer describes an external MCP server to connect to at startup.
+type MCPServer struct {
+	Name      string   `json:"name"`
+	Transport string   `json:"transport"` // "stdio" | "http"
+	Command   string   `json:"command"`   // for stdio
+	Args      []string `json:"args"`
+	URL       string   `json:"url"` // for http
+}
 
 // DefaultContextBudget is the per-request token budget for sliding-window
 // trimming when OLLAMA_AGENT_CONTEXT_BUDGET is unset.
@@ -27,6 +37,10 @@ type Config struct {
 	MaxIterations int
 	// DBPath is the SQLite database file path.
 	DBPath string
+	// MCPServers is the list of external MCP servers to connect to on startup.
+	MCPServers []MCPServer
+	// MCPServerMode, when true, exposes our tools as an MCP server on stdio.
+	MCPServerMode bool
 }
 
 // Load reads configuration from environment variables, applying defaults.
@@ -74,6 +88,8 @@ func Load() *Config {
 		dbPath = filepath.Join(root, "ollama_agent.db")
 	}
 
+	mcpServers := loadMCPConfig(filepath.Join(root, "mcp.json"))
+
 	return &Config{
 		Model:         model,
 		BaseURL:       baseURL,
@@ -82,5 +98,22 @@ func Load() *Config {
 		ContextBudget: budget,
 		MaxIterations: maxIter,
 		DBPath:        dbPath,
+		MCPServers:    mcpServers,
+		MCPServerMode: os.Getenv("OLLAMA_AGENT_MCP_SERVER") == "1",
 	}
+}
+
+// loadMCPConfig reads an mcp.json file if present.
+func loadMCPConfig(path string) []MCPServer {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		MCPServers []MCPServer `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	return cfg.MCPServers
 }

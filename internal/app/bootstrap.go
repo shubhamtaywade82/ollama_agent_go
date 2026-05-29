@@ -2,12 +2,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 
 	"ollama_agent_go/internal/agent"
 	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/mcp"
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/policy"
@@ -29,6 +31,11 @@ type App struct {
 // logWriter may be nil (output is discarded). It is the caller's responsibility
 // to close logWriter after the app shuts down.
 func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
+	return NewWithContext(context.Background(), cfg, logWriter)
+}
+
+// NewWithContext is like New but accepts a context for MCP server connections.
+func NewWithContext(ctx context.Context, cfg *config.Config, logWriter io.Writer) (*App, error) {
 	// Storage (opened before observability so we can wire tracer + audit)
 	db, err := sqstore.Open(cfg.DBPath)
 	if err != nil {
@@ -57,6 +64,26 @@ func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
 	reg := tools.Default(cfg.Root)
 	host := tools.NewHost(reg, pol, obs)
 	host.Saga = store
+
+	// Connect external MCP servers and register their tools.
+	for _, srv := range cfg.MCPServers {
+		mcpSrv := mcp.ServerConfig{
+			Name:      srv.Name,
+			Transport: srv.Transport,
+			Command:   srv.Command,
+			Args:      srv.Args,
+			URL:       srv.URL,
+		}
+		client, err := mcp.ConnectServer(ctx, mcpSrv)
+		if err != nil {
+			obs.Error("mcp connect", err, "server", srv.Name)
+			continue
+		}
+		for _, t := range mcp.AdaptAll(client) {
+			reg.Register(t)
+		}
+		obs.Info("mcp connected", "server", srv.Name, "tools", len(client.Tools()))
+	}
 
 	// Provider router (Ollama only; cloud providers added via env vars later)
 	ollamaClient := ollama.NewClient(cfg.BaseURL, cfg.Model)
