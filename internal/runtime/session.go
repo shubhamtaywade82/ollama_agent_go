@@ -3,8 +3,6 @@ package runtime
 import (
 	"context"
 	"time"
-
-	"ollama_agent_go/internal/types"
 )
 
 // SessionState tracks the current phase of a session.
@@ -19,11 +17,10 @@ const (
 
 // Session is the in-memory state for the current agent session.
 type Session struct {
-	ID           string
-	Conversation []types.Message
-	State        SessionState
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID        string
+	State     SessionState
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // RunContext bundles the context and cancellation for a single agent run.

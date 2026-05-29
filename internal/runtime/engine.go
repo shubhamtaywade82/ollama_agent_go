@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"ollama_agent_go/internal/agent"
+	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/providers/router"
 	"ollama_agent_go/internal/skills"
@@ -25,11 +26,13 @@ type Engine struct {
 	Bus      EventBus
 	Obs      observability.Logger
 	Skills   []skills.Skill
+	Memory   memory.Manager
 
 	session *Session // current in-memory session
 }
 
 // NewEngine creates a fully wired Engine. Call Init() before first Submit().
+// If mem is nil a default in-memory manager (no token budget) is used.
 func NewEngine(
 	ag *agent.Agent,
 	host *tools.Host,
@@ -38,7 +41,14 @@ func NewEngine(
 	bus EventBus,
 	obs observability.Logger,
 	loadedSkills []skills.Skill,
+	mem ...memory.Manager,
 ) *Engine {
+	var mgr memory.Manager
+	if len(mem) > 0 && mem[0] != nil {
+		mgr = mem[0]
+	} else {
+		mgr = memory.NewDefault(0)
+	}
 	return &Engine{
 		Agent:    ag,
 		ToolHost: host,
@@ -47,6 +57,7 @@ func NewEngine(
 		Bus:      bus,
 		Obs:      obs,
 		Skills:   loadedSkills,
+		Memory:   mgr,
 	}
 }
 
@@ -63,6 +74,7 @@ func (e *Engine) Init(ctx context.Context) error {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+	e.Memory.Short().Reset()
 	e.ToolHost.SessionID = id
 	e.Obs.Info("session started", "id", id, "model", e.Agent.Model)
 	return nil
@@ -76,6 +88,11 @@ func (e *Engine) SessionID() string {
 	return ""
 }
 
+// Conversation returns the current short-term conversation window.
+func (e *Engine) Conversation() []types.Message {
+	return e.Memory.Short().Messages()
+}
+
 // Submit accepts user input, runs the agent, and persists results.
 // It blocks until the run completes. Events stream to the caller via emit.
 func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) error {
@@ -86,18 +103,20 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) erro
 	}
 
 	userMsg := types.Message{Role: "user", Content: input}
-	e.session.Conversation = append(e.session.Conversation, userMsg)
+	e.Memory.Short().Append(userMsg)
 	_ = e.Sessions.AppendMessage(ctx, e.session.ID, userMsg)
 	_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateRunning)
 	e.session.State = StateRunning
 
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
-		emit(ev)
+		if emit != nil {
+			emit(ev)
+		}
 		e.Bus.Publish(BusEvent{Name: "agent.event", Payload: ev})
 	}
 
-	result, err := e.Agent.Run(ctx, e.session.Conversation, wrapped)
+	result, err := e.Agent.Run(ctx, e.Memory.Short().Messages(), wrapped)
 
 	if err != nil {
 		_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateFailed)
@@ -109,7 +128,7 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) erro
 	// Persist the assistant response so future turns have full context.
 	if result != "" {
 		assistantMsg := types.Message{Role: "assistant", Content: result}
-		e.session.Conversation = append(e.session.Conversation, assistantMsg)
+		e.Memory.Short().Append(assistantMsg)
 		_ = e.Sessions.AppendMessage(ctx, e.session.ID, assistantMsg)
 	}
 
@@ -119,7 +138,7 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) erro
 
 	e.Obs.Info("run completed",
 		"session", e.session.ID,
-		"turns", len(e.session.Conversation),
+		"turns", len(e.Memory.Short().Messages()),
 	)
 	return nil
 }
@@ -137,6 +156,7 @@ func (e *Engine) ClearHistory(ctx context.Context) error {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+	e.Memory.Short().Reset()
 	e.ToolHost.SessionID = id
 	e.Obs.Info("session cleared", "new_id", id)
 	return nil
@@ -160,4 +180,3 @@ func (e *Engine) GetTool(name string) (tools.Tool, bool) { return e.ToolHost.Get
 
 // LoadedSkills returns the skills loaded into the agent.
 func (e *Engine) LoadedSkills() []skills.Skill { return e.Skills }
-

@@ -8,6 +8,7 @@ import (
 
 	"ollama_agent_go/internal/agent"
 	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/policy"
 	"ollama_agent_go/internal/providers/ollama"
@@ -66,9 +67,17 @@ func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
 	ag.MaxIterations = cfg.MaxIterations
 	ag.System = skills.Inject(agent.SystemPrompt(host), loadedSkills)
 
+	// Memory manager (short-term rolling window + SQLite episodic/profile)
+	mem := memory.New(
+		cfg.ContextBudget,
+		nil, // longterm: Phase 08 (RAG) — no-op stub for now
+		sqstore.NewEpisodicStore(db),
+		sqstore.NewProfileStore(db),
+	)
+
 	// Runtime engine
 	bus := runtime.NewInProcBus()
-	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills)
+	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills, mem)
 
 	return &App{Engine: engine, Config: cfg}, nil
 }

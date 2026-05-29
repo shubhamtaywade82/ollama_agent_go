@@ -85,4 +85,20 @@ CREATE TABLE IF NOT EXISTS token_ledger (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS episodes (
+    id         TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    tags       TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+
+CREATE TABLE IF NOT EXISTS profile (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `

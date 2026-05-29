@@ -66,14 +66,15 @@ func TestEngineSubmitPersistsMessages(t *testing.T) {
 	}
 
 	// Session should have user + assistant messages.
-	if len(engine.session.Conversation) != 2 {
-		t.Errorf("conversation length = %d, want 2", len(engine.session.Conversation))
+	conv := engine.Conversation()
+	if len(conv) != 2 {
+		t.Errorf("conversation length = %d, want 2", len(conv))
 	}
-	if engine.session.Conversation[0].Role != "user" {
-		t.Errorf("first message role = %q, want user", engine.session.Conversation[0].Role)
+	if conv[0].Role != "user" {
+		t.Errorf("first message role = %q, want user", conv[0].Role)
 	}
-	if engine.session.Conversation[1].Role != "assistant" {
-		t.Errorf("second message role = %q, want assistant", engine.session.Conversation[1].Role)
+	if conv[1].Role != "assistant" {
+		t.Errorf("second message role = %q, want assistant", conv[1].Role)
 	}
 
 	// Events should include at least EventDone.
@@ -113,8 +114,8 @@ func TestEngineMultiTurnConversation(t *testing.T) {
 	_ = engine.Submit(ctx, "second message", func(agent.Event) {})
 
 	// After two turns: user1, asst1, user2, asst2 = 4 messages.
-	if len(engine.session.Conversation) != 4 {
-		t.Errorf("conversation length after 2 turns = %d, want 4", len(engine.session.Conversation))
+	if len(engine.Conversation()) != 4 {
+		t.Errorf("conversation length after 2 turns = %d, want 4", len(engine.Conversation()))
 	}
 }
 
@@ -132,7 +133,7 @@ func TestEngineClearHistory(t *testing.T) {
 	if engine.SessionID() == firstID {
 		t.Error("session ID should change after clear")
 	}
-	if len(engine.session.Conversation) != 0 {
+	if len(engine.Conversation()) != 0 {
 		t.Error("conversation should be empty after clear")
 	}
 }
