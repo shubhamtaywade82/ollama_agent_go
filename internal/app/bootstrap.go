@@ -140,10 +140,15 @@ func NewWithContext(ctx context.Context, cfg *config.Config, logWriter io.Writer
 		sqstore.NewProfileStore(db),
 	)
 
+	// Agent selector — build one agent per role with scoped tool access
+	roleAgents := agent.BuildRoleAgents(ag, host)
+	selector := agent.NewSelector(ag, host, roleAgents)
+
 	// Runtime engine
 	bus := runtime.NewInProcBus()
 	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills, mem)
 	engine.Retriever = ret
+	engine.Selector = selector
 	if idxr != nil {
 		engine.Indexer = idxr
 	}

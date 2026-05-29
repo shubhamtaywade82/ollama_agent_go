@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"ollama_agent_go/internal/agent"
+	"ollama_agent_go/internal/agent/roles"
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/providers/router"
@@ -23,6 +24,36 @@ import (
 // Defined here to avoid importing the indexer package from runtime.
 type indexerIface interface {
 	IndexDir(ctx context.Context, dir string, exts []string) error
+}
+
+// SetRole parses roleName and pins the selector, returning an error for unknown names.
+func (e *Engine) SetRole(roleName string) error {
+	role, ok := roles.ParseRole(roleName)
+	if !ok {
+		return fmt.Errorf("unknown role %q; valid: general, research, reasoning, action, data, communication", roleName)
+	}
+	e.PinRole(role)
+	return nil
+}
+
+// PinRole locks the selector to role for all subsequent requests.
+// Pass roles.RoleGeneral (0) to reset to auto-select.
+func (e *Engine) PinRole(role roles.Role) {
+	if e.Selector != nil {
+		e.Selector.Pin(role)
+	}
+}
+
+// PinnedRole returns the currently pinned role name, or "auto" if auto-selecting.
+func (e *Engine) PinnedRole() string {
+	if e.Selector == nil {
+		return "auto"
+	}
+	r := e.Selector.PinnedRole()
+	if r == roles.RoleGeneral {
+		return "auto"
+	}
+	return r.String()
 }
 
 // IndexDir proxies to the wired Indexer, or returns an error if RAG is disabled.
@@ -70,6 +101,9 @@ type Engine struct {
 	// RAG — optional; nil disables automatic context injection and /index
 	Retriever *retriever.Retriever
 	Indexer   indexerIface // set by bootstrap when RAG is enabled
+
+	// Agent role selector — nil means always use e.Agent directly
+	Selector *agent.Selector
 
 	session *Session // current in-memory session
 }
@@ -189,9 +223,15 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		}
 	}
 
-	// Wire HITL interrupt check into the agent loop for this run.
-	e.Agent.InterruptCheck = func() bool { return e.checkHITL(ctx) }
-	defer func() { e.Agent.InterruptCheck = nil }()
+	// Select the right agent for this input.
+	ag := e.Agent
+	if e.Selector != nil {
+		ag = e.Selector.Select(input)
+	}
+
+	// Wire HITL interrupt check into the selected agent loop for this run.
+	ag.InterruptCheck = func() bool { return e.checkHITL(ctx) }
+	defer func() { ag.InterruptCheck = nil }()
 
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
@@ -201,7 +241,7 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		e.Bus.Publish(BusEvent{Name: "agent.event", Payload: ev})
 	}
 
-	result, err := e.Agent.Run(ctx, e.Memory.Short().Messages(), wrapped)
+	result, err := ag.Run(ctx, e.Memory.Short().Messages(), wrapped)
 
 	if err != nil {
 		_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateFailed)

@@ -411,6 +411,24 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 		}
 		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
 
+	case "/agent":
+		if len(parts) < 2 || parts[1] == "status" {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("Current agent role: **%s**\n\nAvailable roles: general, research, reasoning, action, data, communication\nUsage: `/agent <role>` or `/agent reset`", m.engine.PinnedRole()),
+			})
+			break
+		}
+		roleName := strings.ToLower(parts[1])
+		if err := m.engine.SetRole(roleName); err != nil {
+			m.entries = append(m.entries, ChatEntry{Kind: entryError, Content: err.Error()})
+		} else {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("✓ Agent role set to **%s**", roleName),
+			})
+		}
+
 	case "/index":
 		if len(parts) < 2 {
 			m.entries = append(m.entries, ChatEntry{

@@ -1,6 +1,6 @@
 # Phase 09 — Specialized Agent Roles
 
-Tags: `#agents` `#roles` `#research` `#reasoning` `#action` `#data` `#communication` `#selector` `#p2` `#status/planned`
+Tags: `#agents` `#roles` `#research` `#reasoning` `#action` `#data` `#communication` `#selector` `#p2` `#status/done`
 
 Prerequisites: Phase 02 (memory), Phase 04 (provider router), Phase 08 (RAG for research agent).
 
