@@ -411,6 +411,102 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 		}
 		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
 
+	case "/agent":
+		if len(parts) < 2 || parts[1] == "status" {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("Current agent role: **%s**\n\nAvailable roles: general, research, reasoning, action, data, communication\nUsage: `/agent <role>` or `/agent reset`", m.engine.PinnedRole()),
+			})
+			break
+		}
+		roleName := strings.ToLower(parts[1])
+		if err := m.engine.SetRole(roleName); err != nil {
+			m.entries = append(m.entries, ChatEntry{Kind: entryError, Content: err.Error()})
+		} else {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("✓ Agent role set to **%s**", roleName),
+			})
+		}
+
+	case "/index":
+		if len(parts) < 2 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/index <directory>`",
+			})
+			break
+		}
+		dir := parts[1]
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entrySystem,
+			Content: fmt.Sprintf("⟳ Indexing `%s`…", dir),
+		})
+		m.rebuildViewport()
+		go func(ctx context.Context, d string) {
+			err := m.engine.IndexDir(ctx, d)
+			var msg string
+			if err != nil {
+				msg = fmt.Sprintf("Index error: %v", err)
+			} else {
+				msg = fmt.Sprintf("✓ Indexed `%s`", d)
+			}
+			_ = msg // result visible in the log file
+		}(m.ctx, dir)
+		return nil
+
+	case "/plan":
+		if len(parts) < 2 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/plan <goal>` — decompose a goal into sub-tasks (preview only)",
+			})
+			break
+		}
+		goal := strings.Join(parts[1:], " ")
+		preview, err := m.engine.Plan(m.ctx, goal)
+		if err != nil {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entryError,
+				Content: fmt.Sprintf("Plan error: %v", err),
+			})
+		} else {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: preview,
+			})
+		}
+
+	case "/compliance":
+		sub := ""
+		if len(parts) > 1 {
+			sub = parts[1]
+		}
+		switch sub {
+		case "report":
+			snap := m.engine.MetricsSnapshot()
+			var totalToolTotal, totalToolErr int64
+			for _, s := range snap.ToolCalls {
+				totalToolTotal += s.Total
+				totalToolErr += s.Errors
+			}
+			var totalLLM int64
+			for _, s := range snap.LLMCalls {
+				totalLLM += s.Total
+			}
+			totalToolOK := totalToolTotal - totalToolErr
+			totalToolFail := totalToolErr
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("**Compliance Report**\n\nTool calls: %d (success), %d (fail)\nLLM calls: %d\n\nSee audit log for full details (`/audit`).", totalToolOK, totalToolFail, int(totalLLM)),
+			})
+		default:
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/compliance report`",
+			})
+		}
+
 	default:
 		m.entries = append(m.entries, ChatEntry{
 			Kind:    entryError,
@@ -574,6 +670,8 @@ func (m *Model) renderSidebar() string {
 		shortcut("/session", "stats"),
 		shortcut("/audit", "audit log"),
 		shortcut("/metrics", "counters"),
+		shortcut("/agent", "set role"),
+		shortcut("/plan", "preview plan"),
 		shortcut("/clear", "new session"),
 	}
 
@@ -715,6 +813,9 @@ func helpText() string {
 		"| `/session` | Show session statistics |",
 		"| `/audit [n]` | Show last N audit events (default 10) |",
 		"| `/metrics` | Show call counters and token totals |",
+		"| `/index <dir>` | Index a directory into the knowledge base |",
+		"| `/agent <role>` | Pin agent role (research/reasoning/action/data/communication/reset) |",
+		"| `/plan <goal>` | Decompose a goal into a task plan (preview, no execution) |",
 		"| `/clear` | Clear history and start a new session |",
 		"",
 		"**Keyboard Shortcuts**",

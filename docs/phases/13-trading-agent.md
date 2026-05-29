@@ -1,6 +1,6 @@
 # Phase 13 — Trading Agent
 
-Tags: `#trading` `#finance` `#market-data` `#signals` `#portfolio` `#risk` `#backtest` `#p3` `#status/planned`
+Tags: `#trading` `#finance` `#market-data` `#signals` `#portfolio` `#risk` `#backtest` `#p3` `#status/done`
 
 Prerequisites: Phases 01–12 (full runtime kernel, orchestration, RAG, governance).
 

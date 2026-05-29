@@ -105,16 +105,25 @@ func firstNonNil(vals ...map[string]any) map[string]any {
 	return nil
 }
 
+// ToolNamer can list and look up tools by name. Satisfied by *tools.Host.
+type ToolNamer interface {
+	Names() []string
+	Get(name string) (tools.Tool, bool)
+}
+
 // SystemPrompt builds the agent's system instructions from the tool host.
-func SystemPrompt(host *tools.Host) string {
+// host may be nil (yields generic prompt without tool listing).
+func SystemPrompt(host ToolNamer) string {
 	var b strings.Builder
 	b.WriteString("You are a precise terminal coding agent operating inside a sandboxed project directory. ")
 	b.WriteString("Use the provided tools to inspect and modify files; do not guess file contents. ")
 	b.WriteString("Prefer edit_file (unified diff) for surgical changes. When the task is complete, reply with a concise final answer and no tool call.\n\n")
-	b.WriteString("Available tools:\n")
-	for _, name := range host.Names() {
-		if t, ok := host.Get(name); ok {
-			fmt.Fprintf(&b, "- %s: %s\n", t.Name(), t.Description())
+	if host != nil {
+		b.WriteString("Available tools:\n")
+		for _, name := range host.Names() {
+			if t, ok := host.Get(name); ok {
+				fmt.Fprintf(&b, "- %s: %s\n", t.Name(), t.Description())
+			}
 		}
 	}
 	b.WriteString("\nIf you cannot emit native tool calls, request a tool by writing a single JSON object in a fenced code block, e.g.:\n")

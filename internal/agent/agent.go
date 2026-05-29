@@ -16,6 +16,13 @@ type Chatter interface {
 	Chat(ctx context.Context, req types.ChatRequest) (types.ChatResponse, error)
 }
 
+// ToolRunner is the interface the agent uses to list and invoke tools.
+// Both *tools.Host and *tools.ScopedHost satisfy this interface.
+type ToolRunner interface {
+	Specs() []tools.Spec
+	Execute(ctx context.Context, name string, args map[string]any) (string, error)
+}
+
 // Runner is the interface the engine uses to invoke an agent run.
 type Runner interface {
 	Run(ctx context.Context, history []types.Message, emit Emit) (string, error)
@@ -24,7 +31,7 @@ type Runner interface {
 // Agent runs the think-act loop against a model backend with a tool host.
 type Agent struct {
 	Client        Chatter
-	ToolHost      *tools.Host
+	ToolHost      ToolRunner // *tools.Host or *tools.ScopedHost
 	Model         string
 	ModelHint     string // optional provider-selection hint propagated to the router
 	System        string
@@ -39,14 +46,18 @@ type Agent struct {
 }
 
 // New builds an Agent with sensible defaults.
-func New(client Chatter, host *tools.Host, model string) *Agent {
+// host is stored as-is; if it also satisfies ToolNamer, a tool list is
+// appended to the system prompt automatically.
+func New(client Chatter, host ToolRunner, model string) *Agent {
 	ag := &Agent{
 		Client:        client,
 		ToolHost:      host,
 		Model:         model,
 		MaxIterations: DefaultMaxIterations,
 	}
-	ag.System = SystemPrompt(host)
+	if namer, ok := host.(ToolNamer); ok {
+		ag.System = SystemPrompt(namer)
+	}
 	return ag
 }
 

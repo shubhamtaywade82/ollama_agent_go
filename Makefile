@@ -5,7 +5,7 @@ PKG := ./...
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build run test test-race cover vet fmt lint tidy clean install ci
+.PHONY: all build run test test-race cover vet fmt lint tidy clean install ci docker-build docker-up index
 
 all: fmt vet test build
 
@@ -44,3 +44,12 @@ install:
 	$(GO) install -trimpath -ldflags '$(LDFLAGS)' ./cmd/ollama_agent
 
 ci: tidy vet test-race build
+
+docker-build:
+	docker build -t ollama-agent:dev .
+
+docker-up:
+	docker compose up -d
+
+index:
+	$(GO) run ./cmd/ollama_agent --index ./docs

@@ -3,20 +3,69 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"ollama_agent_go/internal/agent"
+	"ollama_agent_go/internal/agent/roles"
+	"ollama_agent_go/internal/governance"
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
+	"ollama_agent_go/internal/orchestration"
 	"ollama_agent_go/internal/providers/router"
 	"ollama_agent_go/internal/reliability"
+	"ollama_agent_go/internal/retriever"
 	"ollama_agent_go/internal/skills"
 	"ollama_agent_go/internal/storage"
 	"ollama_agent_go/internal/tools"
 	"ollama_agent_go/internal/types"
 )
+
+// indexerIface is the subset of indexer.Indexer needed by the engine.
+// Defined here to avoid importing the indexer package from runtime.
+type indexerIface interface {
+	IndexDir(ctx context.Context, dir string, exts []string) error
+}
+
+// SetRole parses roleName and pins the selector, returning an error for unknown names.
+func (e *Engine) SetRole(roleName string) error {
+	role, ok := roles.ParseRole(roleName)
+	if !ok {
+		return fmt.Errorf("unknown role %q; valid: general, research, reasoning, action, data, communication", roleName)
+	}
+	e.PinRole(role)
+	return nil
+}
+
+// PinRole locks the selector to role for all subsequent requests.
+// Pass roles.RoleGeneral (0) to reset to auto-select.
+func (e *Engine) PinRole(role roles.Role) {
+	if e.Selector != nil {
+		e.Selector.Pin(role)
+	}
+}
+
+// PinnedRole returns the currently pinned role name, or "auto" if auto-selecting.
+func (e *Engine) PinnedRole() string {
+	if e.Selector == nil {
+		return "auto"
+	}
+	r := e.Selector.PinnedRole()
+	if r == roles.RoleGeneral {
+		return "auto"
+	}
+	return r.String()
+}
+
+// IndexDir proxies to the wired Indexer, or returns an error if RAG is disabled.
+func (e *Engine) IndexDir(ctx context.Context, dir string) error {
+	if e.Indexer == nil {
+		return fmt.Errorf("RAG not enabled (set OLLAMA_AGENT_RAG=1)")
+	}
+	return e.Indexer.IndexDir(ctx, dir, nil)
+}
 
 // HITLCheckpoint is delivered to the registered HITLHandler when engine.Interrupt() fires.
 type HITLCheckpoint struct {
@@ -51,6 +100,21 @@ type Engine struct {
 	Fallback reliability.RetryConfig // retry config for agent-level fallback
 	hitl     HITLHandler             // nil = no HITL
 	hitlFlag atomic.Bool             // set by Interrupt(); cleared after checkpoint
+
+	// RAG — optional; nil disables automatic context injection and /index
+	Retriever *retriever.Retriever
+	Indexer   indexerIface // set by bootstrap when RAG is enabled
+
+	// Agent role selector — nil means always use e.Agent directly
+	Selector *agent.Selector
+
+	// Orchestrator — optional; used for multi-step goal decomposition.
+	// Set by bootstrap when orchestration is enabled.
+	Orchestrator *orchestration.Orchestrator
+
+	// Governor applies security and compliance policies.
+	// nil = no governance (default permissive behaviour).
+	Governor *governance.Governor
 
 	session *Session // current in-memory session
 }
@@ -146,6 +210,14 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		Result:    "ok",
 	})
 
+	// Governance: guardrail input check and PII scrubbing.
+	if e.Governor != nil {
+		if gr := e.Governor.Guardrail.CheckInput(ctx, input); gr.Blocked {
+			return fmt.Errorf("input blocked by guardrail: %s", gr.Reason)
+		}
+		input = e.Governor.ScrubInput(input)
+	}
+
 	userMsg := types.Message{Role: "user", Content: input}
 	e.Memory.Short().Append(userMsg)
 	_ = e.Sessions.AppendMessage(ctx, e.session.ID, userMsg)
@@ -160,9 +232,15 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		}
 	}()
 
-	// Wire HITL interrupt check into the agent loop for this run.
-	e.Agent.InterruptCheck = func() bool { return e.checkHITL(ctx) }
-	defer func() { e.Agent.InterruptCheck = nil }()
+	// RAG: inject retrieved context as a system message before the run.
+	if e.Retriever != nil {
+		if chunks, err := e.Retriever.Retrieve(ctx, input); err == nil && len(chunks) > 0 {
+			e.Memory.Short().Append(types.Message{
+				Role:    "system",
+				Content: e.Retriever.InjectContext(chunks),
+			})
+		}
+	}
 
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
@@ -172,7 +250,25 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		e.Bus.Publish(BusEvent{Name: "agent.event", Payload: ev})
 	}
 
-	result, err := e.Agent.Run(ctx, e.Memory.Short().Messages(), wrapped)
+	var result string
+	var err error
+
+	// Use orchestrator for complex multi-step goals when available.
+	if e.Orchestrator != nil && isComplexGoal(input) {
+		result, err = e.Orchestrator.Run(ctx, input, wrapped)
+	} else {
+		// Select the right agent for this input.
+		ag := e.Agent
+		if e.Selector != nil {
+			ag = e.Selector.Select(input)
+		}
+
+		// Wire HITL interrupt check into the selected agent loop for this run.
+		ag.InterruptCheck = func() bool { return e.checkHITL(ctx) }
+		defer func() { ag.InterruptCheck = nil }()
+
+		result, err = ag.Run(ctx, e.Memory.Short().Messages(), wrapped)
+	}
 
 	if err != nil {
 		_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateFailed)
@@ -181,9 +277,23 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		return err
 	}
 
+	// Governance: guardrail output check and PII scrubbing.
+	if e.Governor != nil && result != "" {
+		if gr := e.Governor.Guardrail.CheckOutput(ctx, result); gr.Blocked {
+			result = "[Response blocked by output guardrail]"
+			e.Obs.Info("output blocked by guardrail", "session", e.session.ID, "reason", gr.Reason)
+		} else {
+			result = e.Governor.ScrubOutput(result)
+		}
+	}
+
 	// Persist the assistant response so future turns have full context.
 	if result != "" {
-		assistantMsg := types.Message{Role: "assistant", Content: result}
+		stored := result
+		if e.Governor != nil {
+			stored = e.Governor.ScrubStorage(result)
+		}
+		assistantMsg := types.Message{Role: "assistant", Content: stored}
 		e.Memory.Short().Append(assistantMsg)
 		_ = e.Sessions.AppendMessage(ctx, e.session.ID, assistantMsg)
 	}
@@ -296,4 +406,29 @@ func (e *Engine) ExportAudit(ctx context.Context) ([]observability.AuditEvent, e
 // MetricsSnapshot returns a point-in-time snapshot of all counters.
 func (e *Engine) MetricsSnapshot() observability.MetricsSnapshot {
 	return e.Obs.Metrics().Snapshot()
+}
+
+// Plan decomposes goal into a task graph and returns a human-readable preview.
+// Returns an error if no Orchestrator is wired.
+func (e *Engine) Plan(ctx context.Context, goal string) (string, error) {
+	if e.Orchestrator == nil {
+		return "", fmt.Errorf("orchestration not enabled")
+	}
+	return e.Orchestrator.Preview(ctx, goal)
+}
+
+// isComplexGoal returns true for inputs that benefit from multi-step orchestration:
+// multiple sentences, explicit sequencing words, or long goals (>200 chars).
+func isComplexGoal(input string) bool {
+	if len(input) > 200 {
+		return true
+	}
+	lower := strings.ToLower(input)
+	sequencers := []string{"and then", "after that", "first ", "next ", "finally ", "then ", "step 1", "step 2"}
+	for _, s := range sequencers {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
 }

@@ -1,0 +1,22 @@
+services:
+  agent:
+    build: .
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_AGENT_API=:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      - ollama
+    volumes:
+      - ./data:/app/data
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+volumes:
+  ollama_models:
