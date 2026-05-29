@@ -95,12 +95,33 @@ type Model struct {
 	renderer      *glamour.TermRenderer
 }
 
+// slashCommands is the static set of slash commands offered as inline
+// suggestions. textinput prefix-matches against the whole input value, so a
+// user typing "/he" gets the "/help" ghost completion (Tab accepts, ↑↓ cycle).
+var slashCommands = []string{
+	"/help",
+	"/clear",
+	"/model",
+	"/tools",
+	"/session",
+	"/models",
+	"/skills",
+	"/audit",
+	"/metrics",
+	"/agent",
+	"/index",
+	"/plan",
+	"/compliance",
+}
+
 // NewModel builds the initial TUI model wrapping the given engine.
 func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "Type a message or /help…"
 	ti.Focus()
 	ti.CharLimit = 4096
+	ti.ShowSuggestions = true
+	ti.SetSuggestions(slashCommands)
 
 	vp := viewport.New(80, 20)
 	vp.SetContent(welcomeText())

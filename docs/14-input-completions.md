@@ -86,8 +86,8 @@ Providers to implement (all four triggers requested):
 | model name arg       | `ModelProvider` | Ollama client list; later Catwalk catalog           |
 | `#`                  | `SkillProvider` | `engine.LoadedSkills()` (+ optional code symbols)   |
 
-`ModelProvider` activates contextually: when the line is `/model ` it owns the
-trailing token. `SkillProvider` mirrors `FileProvider` but keys on `#`.
+`ModelProvider` activates contextually: when the line is `/model` followed by a
+space it owns the trailing token. `SkillProvider` mirrors `FileProvider` but keys on `#`.
 
 ### Dropdown component
 
