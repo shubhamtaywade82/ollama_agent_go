@@ -8,12 +8,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"ollama_agent_go/internal/agent"
+	"ollama_agent_go/internal/observability"
+	"ollama_agent_go/internal/policy"
 	"ollama_agent_go/internal/runtime"
+	"ollama_agent_go/internal/tools"
+	"ollama_agent_go/internal/types"
 )
 
-// newTestModel builds a Model with the minimal engine state View touches.
+// newTestModel builds a Model with the minimal engine state View and SetModel
+// touch (Agent + a real, empty ToolHost so SystemPrompt can enumerate tools).
 func newTestModel() *Model {
-	eng := &runtime.Engine{Agent: &agent.Agent{Model: "test-model"}}
+	host := tools.NewHost(
+		tools.NewRegistry("."),
+		policy.NewDefaultEngine(".", nil, true),
+		observability.Discard,
+	)
+	eng := &runtime.Engine{Agent: &agent.Agent{Model: "test-model"}, ToolHost: host}
 	return NewModel(eng, nil, ".")
 }
 
@@ -55,6 +65,100 @@ func TestAgentMessageRewrapsOnResize(t *testing.T) {
 
 	if narrow >= wide {
 		t.Errorf("agent message should wrap narrower on a small window: narrow=%d wide=%d", narrow, wide)
+	}
+}
+
+// TestModelsPickerRunsInProgram guards the "TUI breaks after switching model"
+// bug: the picker must run as an in-program mode (no nested tea.Program) and
+// return to chat on select, applying the chosen model.
+func TestModelsPickerRunsInProgram(t *testing.T) {
+	m := newTestModel()
+	u, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = u.(*Model)
+
+	models := []types.ModelInfo{{Name: "model-a"}, {Name: "model-b"}}
+	u, _ = m.Update(modelsLoadedMsg{models: models})
+	m = u.(*Model)
+	if m.mode != modePicker {
+		t.Fatalf("loading models should enter picker mode, got %v", m.mode)
+	}
+	if lipgloss.Height(m.View()) == 0 {
+		t.Error("picker view should render")
+	}
+
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = u.(*Model)
+	if m.mode != modeChat {
+		t.Errorf("enter should return to chat mode, got %v", m.mode)
+	}
+	if got := m.engine.Model(); got != "model-a" {
+		t.Errorf("selected model not applied: got %q", got)
+	}
+}
+
+func TestModelsPickerCancel(t *testing.T) {
+	m := newTestModel()
+	u, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = u.(*Model)
+	u, _ = m.Update(modelsLoadedMsg{models: []types.ModelInfo{{Name: "x"}}})
+	m = u.(*Model)
+
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = u.(*Model)
+	if m.mode != modeChat {
+		t.Errorf("esc should cancel the picker, got mode %v", m.mode)
+	}
+}
+
+// TestInputHistoryRecall covers ↑/↓ shell-style history browsing.
+func TestInputHistoryRecall(t *testing.T) {
+	m := newTestModel()
+	m.recordHistory("first")
+	m.recordHistory("second")
+	m.recordHistory("second") // consecutive duplicate ignored
+
+	if len(m.history) != 2 {
+		t.Fatalf("dup should be skipped, history=%v", m.history)
+	}
+
+	m.historyPrev()
+	if m.textInput.Value() != "second" {
+		t.Errorf("first ↑ should recall newest, got %q", m.textInput.Value())
+	}
+	m.historyPrev()
+	if m.textInput.Value() != "first" {
+		t.Errorf("second ↑ should recall oldest, got %q", m.textInput.Value())
+	}
+	m.historyPrev() // clamp at oldest
+	if m.textInput.Value() != "first" {
+		t.Errorf("↑ at oldest should stay, got %q", m.textInput.Value())
+	}
+
+	m.historyNext()
+	if m.textInput.Value() != "second" {
+		t.Errorf("↓ should move to newer, got %q", m.textInput.Value())
+	}
+	m.historyNext() // past newest → restore stashed live input ("")
+	if m.textInput.Value() != "" {
+		t.Errorf("↓ past newest should restore live input, got %q", m.textInput.Value())
+	}
+}
+
+// TestInputHistoryStashesLiveInput verifies an in-progress line is preserved
+// when browsing up then back down.
+func TestInputHistoryStashesLiveInput(t *testing.T) {
+	m := newTestModel()
+	m.recordHistory("old")
+	m.setInput("draft in progress")
+	m.histPos = len(m.history) // simulate live (not browsing)
+
+	m.historyPrev()
+	if m.textInput.Value() != "old" {
+		t.Errorf("↑ should recall history, got %q", m.textInput.Value())
+	}
+	m.historyNext()
+	if m.textInput.Value() != "draft in progress" {
+		t.Errorf("↓ should restore the stashed draft, got %q", m.textInput.Value())
 	}
 }
 

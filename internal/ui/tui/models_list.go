@@ -69,9 +69,7 @@ func (d modelDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 }
 
 type modelsPicker struct {
-	list   list.Model
-	chosen string
-	done   bool
+	list list.Model
 }
 
 func newModelsPicker(models []types.ModelInfo, width, height int) modelsPicker {
@@ -94,32 +92,6 @@ func newModelsPicker(models []types.ModelInfo, width, height int) modelsPicker {
 	l.SetShowHelp(true)
 
 	return modelsPicker{list: l}
-}
-
-func (m modelsPicker) Init() tea.Cmd { return nil }
-
-func (m modelsPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "enter":
-			if item, ok := m.list.SelectedItem().(modelItem); ok {
-				m.chosen = item.info.Name
-				m.done = true
-				return m, tea.Quit
-			}
-		case "q", "esc", "ctrl+c":
-			m.done = true
-			return m, tea.Quit
-		}
-	case tea.WindowSizeMsg:
-		m.list.SetWidth(msg.Width)
-		m.list.SetHeight(msg.Height - 2)
-	}
-
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
 }
 
 func (m modelsPicker) View() string {

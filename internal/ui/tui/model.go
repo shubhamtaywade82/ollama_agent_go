@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -99,7 +100,27 @@ type Model struct {
 	// ModelProvider and is refreshed whenever /models fetches the list.
 	comp         *completions.Model
 	cachedModels []string
+
+	// mode toggles between the chat view and an embedded full-screen picker.
+	// The picker is rendered inside this same program (never a nested
+	// tea.Program, which would corrupt the alternate screen).
+	mode   inputMode
+	picker modelsPicker
+
+	// Submitted-input history for ↑/↓ recall. histPos == len(history) means the
+	// live (un-browsed) input; histStash holds the in-progress text while
+	// browsing so ↓ past the newest entry restores it.
+	history   []string
+	histPos   int
+	histStash string
 }
+
+type inputMode int
+
+const (
+	modeChat inputMode = iota
+	modePicker
+)
 
 // slashCommands is the static set of slash commands. It drives both the inline
 // textinput ghost suggestions (Tab accepts, ↑↓ cycle) and the SlashProvider in
@@ -214,6 +235,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.textInput.Width = chatW
 		m.comp.SetWidth(chatW)
+		if m.mode == modePicker {
+			m.picker.list.SetWidth(m.pickerW())
+			m.picker.list.SetHeight(m.pickerH())
+		}
 		if m.renderer != nil {
 			m.renderer, _ = glamour.NewTermRenderer(
 				glamour.WithStandardStyle("dark"),
@@ -223,6 +248,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildViewport()
 
 	case tea.KeyMsg:
+		// Picker mode owns the whole screen until a model is chosen or cancelled.
+		if m.mode == modePicker {
+			return m.updatePicker(msg)
+		}
+
 		// When the autocomplete dropdown is open it owns navigation/accept keys.
 		if m.comp.Visible() {
 			switch msg.String() {
@@ -262,6 +292,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case tea.KeyUp:
+			m.historyPrev()
+			return m, nil
+
+		case tea.KeyDown:
+			m.historyNext()
+			return m, nil
+
 		case tea.KeyEnter:
 			if m.status != statusReady {
 				return m, nil
@@ -270,7 +308,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if input == "" {
 				return m, nil
 			}
+			m.recordHistory(input)
 			m.textInput.Reset()
+			m.comp.Hide() // never leave a stale dropdown after submitting
 			cmd := m.handleInput(input)
 			return m, cmd
 
@@ -332,19 +372,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, mi := range msg.models {
 			m.cachedModels[i] = mi.Name
 		}
-		picker := newModelsPicker(msg.models, m.width-4, m.height-4)
-		sub := tea.NewProgram(picker, tea.WithAltScreen())
-		result, err := sub.Run()
-		if err == nil {
-			if pm, ok := result.(modelsPicker); ok && pm.chosen != "" {
-				m.engine.SetModel(pm.chosen)
-				m.entries = append(m.entries, ChatEntry{
-					Kind:    entrySystem,
-					Content: fmt.Sprintf("✓ Switched to **%s**", pm.chosen),
-				})
-			}
-		}
-		m.rebuildViewport()
+		// Enter picker mode in-place (no nested program).
+		m.picker = newModelsPicker(msg.models, m.pickerW(), m.pickerH())
+		m.mode = modePicker
+		return m, nil
 	}
 
 	var tiCmd, vpCmd tea.Cmd
@@ -352,8 +383,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 	cmds = append(cmds, tiCmd, vpCmd)
 
-	// Recompute autocomplete candidates after the input has processed the key.
+	// A plain edit key reaching here (↑/↓ return earlier) means the user is no
+	// longer browsing history; reset to the live input and refresh completions.
 	if _, ok := msg.(tea.KeyMsg); ok {
+		m.histPos = len(m.history)
 		m.comp.Refresh(m.textInput.Value(), m.textInput.Position())
 	}
 
@@ -372,6 +405,49 @@ func (m *Model) handleInput(input string) tea.Cmd {
 	m.rebuildViewport()
 
 	return m.runAgent(input)
+}
+
+// recordHistory appends a submitted input, skipping consecutive duplicates, and
+// resets the browse position to the live input.
+func (m *Model) recordHistory(input string) {
+	if n := len(m.history); n == 0 || m.history[n-1] != input {
+		m.history = append(m.history, input)
+	}
+	m.histPos = len(m.history)
+	m.histStash = ""
+}
+
+// historyPrev recalls the previous submitted input (↑).
+func (m *Model) historyPrev() {
+	if len(m.history) == 0 || m.histPos == 0 {
+		return
+	}
+	if m.histPos == len(m.history) {
+		m.histStash = m.textInput.Value() // stash the live input
+	}
+	m.histPos--
+	m.setInput(m.history[m.histPos])
+}
+
+// historyNext moves toward newer inputs (↓), restoring the stashed live input
+// when stepping past the newest entry.
+func (m *Model) historyNext() {
+	if m.histPos >= len(m.history) {
+		return
+	}
+	m.histPos++
+	if m.histPos == len(m.history) {
+		m.setInput(m.histStash)
+	} else {
+		m.setInput(m.history[m.histPos])
+	}
+}
+
+// setInput replaces the input value and parks the cursor at the end.
+func (m *Model) setInput(s string) {
+	m.textInput.SetValue(s)
+	m.textInput.CursorEnd()
+	m.comp.Hide()
 }
 
 // handleSlashCommand interprets /command inputs.
@@ -694,9 +770,62 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
+// ── Model picker (embedded, in-program) ────────────────────────────────────
+
+// pickerW/pickerH size the picker list inside its bordered, padded frame.
+func (m *Model) pickerW() int {
+	w := m.width - 6
+	if w < 10 {
+		w = 10
+	}
+	return w
+}
+
+func (m *Model) pickerH() int {
+	h := m.height - 6
+	if h < 3 {
+		h = 3
+	}
+	return h
+}
+
+// updatePicker drives the embedded model picker and returns to chat mode on
+// select or cancel.
+func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While the filter input is active the list consumes all keys.
+	if m.picker.list.FilterState() != list.Filtering {
+		switch msg.String() {
+		case "enter":
+			if item, ok := m.picker.list.SelectedItem().(modelItem); ok {
+				m.engine.SetModel(item.info.Name)
+				m.entries = append(m.entries, ChatEntry{
+					Kind:    entrySystem,
+					Content: fmt.Sprintf("✓ Switched to **%s**", item.info.Name),
+				})
+			}
+			m.mode = modeChat
+			m.rebuildViewport()
+			return m, nil
+		case "esc", "q":
+			m.mode = modeChat
+			return m, nil
+		case "ctrl+c":
+			m.cancel()
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.picker.list, cmd = m.picker.list.Update(msg)
+	return m, cmd
+}
+
 func (m *Model) View() string {
 	if m.width == 0 {
 		return "Initializing…"
+	}
+
+	if m.mode == modePicker {
+		return m.picker.View()
 	}
 
 	// MaxWidth truncates the header so a long subtitle never widens the frame
