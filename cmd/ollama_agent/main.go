@@ -67,7 +67,7 @@ func main() {
 	// The Ollama client is needed only for the /models picker.
 	ollamaClient := ollamaprovider.NewClient(cfg.BaseURL, cfg.Model)
 
-	m := tui.NewModel(application.Engine, ollamaClient)
+	m := tui.NewModel(application.Engine, ollamaClient, cfg.Root)
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),

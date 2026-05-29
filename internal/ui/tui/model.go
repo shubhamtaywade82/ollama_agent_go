@@ -19,6 +19,7 @@ import (
 	ollamaprovider "ollama_agent_go/internal/providers/ollama"
 	"ollama_agent_go/internal/runtime"
 	"ollama_agent_go/internal/tokens"
+	"ollama_agent_go/internal/ui/tui/completions"
 )
 
 // ── Agent event plumbing ─────────────────────────────────────────────────────
@@ -93,35 +94,50 @@ type Model struct {
 
 	modelsLoading bool
 	renderer      *glamour.TermRenderer
+
+	// comp is the trigger-driven autocomplete dropdown. cachedModels feeds its
+	// ModelProvider and is refreshed whenever /models fetches the list.
+	comp         *completions.Model
+	cachedModels []string
 }
 
-// slashCommands is the static set of slash commands offered as inline
-// suggestions. textinput prefix-matches against the whole input value, so a
-// user typing "/he" gets the "/help" ghost completion (Tab accepts, ↑↓ cycle).
-var slashCommands = []string{
-	"/help",
-	"/clear",
-	"/model",
-	"/tools",
-	"/session",
-	"/models",
-	"/skills",
-	"/audit",
-	"/metrics",
-	"/agent",
-	"/index",
-	"/plan",
-	"/compliance",
+// slashCommands is the static set of slash commands. It drives both the inline
+// textinput ghost suggestions (Tab accepts, ↑↓ cycle) and the SlashProvider in
+// the autocomplete dropdown.
+var slashCommands = []completions.Command{
+	{Name: "/help", Desc: "show commands"},
+	{Name: "/clear", Desc: "new session"},
+	{Name: "/model", Desc: "switch model"},
+	{Name: "/tools", Desc: "list tools"},
+	{Name: "/session", Desc: "session stats"},
+	{Name: "/models", Desc: "browse models"},
+	{Name: "/skills", Desc: "list skills"},
+	{Name: "/audit", Desc: "audit log"},
+	{Name: "/metrics", Desc: "counters"},
+	{Name: "/agent", Desc: "set role"},
+	{Name: "/index", Desc: "index workspace"},
+	{Name: "/plan", Desc: "preview plan"},
+	{Name: "/compliance", Desc: "compliance report"},
 }
 
-// NewModel builds the initial TUI model wrapping the given engine.
-func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client) *Model {
+// slashCommandNames returns just the command strings for textinput suggestions.
+func slashCommandNames() []string {
+	names := make([]string, len(slashCommands))
+	for i, c := range slashCommands {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// NewModel builds the initial TUI model wrapping the given engine. root is the
+// sandbox root used for @-file completion.
+func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client, root string) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "Type a message or /help…"
 	ti.Focus()
 	ti.CharLimit = 4096
 	ti.ShowSuggestions = true
-	ti.SetSuggestions(slashCommands)
+	ti.SetSuggestions(slashCommandNames())
 
 	vp := viewport.New(80, 20)
 	vp.SetContent(welcomeText())
@@ -137,7 +153,7 @@ func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client) *Mode
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Model{
+	m := &Model{
 		viewport:     vp,
 		textInput:    ti,
 		spinner:      sp,
@@ -149,6 +165,25 @@ func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client) *Mode
 		cancel:       cancel,
 		stats:        sessionStats{startedAt: time.Now()},
 	}
+
+	m.comp = completions.New(
+		completions.SlashProvider{Commands: slashCommands},
+		completions.ModelProvider{Names: func() []string { return m.cachedModels }},
+		completions.FileProvider{Root: root},
+		completions.SkillProvider{Skills: m.skillItems},
+	)
+
+	return m
+}
+
+// skillItems adapts loaded skills to the completion provider's shape.
+func (m *Model) skillItems() []completions.NamedItem {
+	loaded := m.engine.LoadedSkills()
+	out := make([]completions.NamedItem, len(loaded))
+	for i, s := range loaded {
+		out[i] = completions.NamedItem{Name: s.Name, Desc: s.Description}
+	}
+	return out
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -177,6 +212,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = chatW
 		m.viewport.Height = m.height - 7
 		m.textInput.Width = chatW - 4
+		m.comp.SetWidth(chatW - 4)
 		if m.renderer != nil {
 			m.renderer, _ = glamour.NewTermRenderer(
 				glamour.WithStandardStyle("dark"),
@@ -186,6 +222,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildViewport()
 
 	case tea.KeyMsg:
+		// When the autocomplete dropdown is open it owns navigation/accept keys.
+		if m.comp.Visible() {
+			switch msg.String() {
+			case "up", "ctrl+p":
+				m.comp.Move(-1)
+				return m, nil
+			case "down", "ctrl+n":
+				m.comp.Move(1)
+				return m, nil
+			case "tab", "enter":
+				if line, cur, ok := m.comp.Accept(m.textInput.Value(), m.textInput.Position()); ok {
+					m.textInput.SetValue(line)
+					m.textInput.SetCursor(cur)
+				}
+				return m, nil
+			case "esc":
+				m.comp.Hide()
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.cancel()
@@ -268,6 +325,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildViewport()
 			break
 		}
+		// Cache names so the /model autocomplete provider has a source.
+		m.cachedModels = make([]string, len(msg.models))
+		for i, mi := range msg.models {
+			m.cachedModels[i] = mi.Name
+		}
 		picker := newModelsPicker(msg.models, m.width-4, m.height-4)
 		sub := tea.NewProgram(picker, tea.WithAltScreen())
 		result, err := sub.Run()
@@ -287,6 +349,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.textInput, tiCmd = m.textInput.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
 	cmds = append(cmds, tiCmd, vpCmd)
+
+	// Recompute autocomplete candidates after the input has processed the key.
+	if _, ok := msg.(tea.KeyMsg); ok {
+		m.comp.Refresh(m.textInput.Value(), m.textInput.Position())
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -643,12 +710,13 @@ func (m *Model) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, chat, "  ", sidebar)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		body,
-		input,
-		statusBar,
-	)
+	parts := []string{header, body}
+	if m.comp.Visible() {
+		parts = append(parts, m.comp.View())
+	}
+	parts = append(parts, input, statusBar)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m *Model) renderHeader() string {
