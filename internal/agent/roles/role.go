@@ -11,6 +11,7 @@ const (
 	RoleAction
 	RoleData
 	RoleCommunication
+	RoleTrading
 )
 
 func (r Role) String() string {
@@ -25,6 +26,8 @@ func (r Role) String() string {
 		return "data"
 	case RoleCommunication:
 		return "communication"
+	case RoleTrading:
+		return "trading"
 	default:
 		return "general"
 	}
@@ -49,6 +52,8 @@ func ParseRole(s string) (Role, bool) {
 		return RoleData, true
 	case "communication", "comms":
 		return RoleCommunication, true
+	case "trading":
+		return RoleTrading, true
 	case "general", "reset", "":
 		return RoleGeneral, true
 	default:
@@ -102,5 +107,11 @@ var DefaultConfigs = map[Role]RoleConfig{
 		SystemPrompt:  commPrompt,
 		AllowedTools:  []string{},
 		MaxIterations: 3,
+	},
+	RoleTrading: {
+		Role:          RoleTrading,
+		SystemPrompt:  tradingPrompt,
+		AllowedTools:  []string{"get_quote", "get_ohlcv", "get_signals", "get_portfolio", "place_order", "cancel_order", "get_news"},
+		MaxIterations: 15,
 	},
 }

@@ -25,6 +25,7 @@ func NewSelector(base *Agent, host *tools.Host, roleAgents map[roles.Role]*Agent
 	for _, role := range []roles.Role{
 		roles.RoleGeneral, roles.RoleResearch, roles.RoleReasoning,
 		roles.RoleAction, roles.RoleData, roles.RoleCommunication,
+		roles.RoleTrading,
 	} {
 		if ag, ok := roleAgents[role]; ok {
 			s.agents[role] = ag
@@ -93,6 +94,13 @@ func detectRole(input string) roles.Role {
 	for _, kw := range dataKeywords {
 		if strings.Contains(lower, kw) {
 			return roles.RoleData
+		}
+	}
+
+	tradingKeywords := []string{"quote", "buy ", "sell ", "ticker", "stock", "trade", "portfolio", "signal", "chart", "rsi", "macd", "ohlcv", "market data", "earnings", "equity"}
+	for _, kw := range tradingKeywords {
+		if strings.Contains(lower, kw) {
+			return roles.RoleTrading
 		}
 	}
 
