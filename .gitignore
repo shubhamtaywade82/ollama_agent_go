@@ -1,26 +1,57 @@
 # Binaries
 /bin/
+/dist/
 /ollama_agent_go
+/ollama_agent
 *.exe
+*.exe~
 *.out
+*.test
 
-# Coverage
+# Go build / tool cache
+/.cache/
+vendor/
+
+# Test & coverage
 coverage.out
 coverage.html
+*.coverprofile
+/testdata/
 
-# Go workspace / cache
-/dist/
-/.cache/
+# Profiling
+*.prof
+cpu.out
+mem.out
+trace.out
+
+# SQLite databases (including WAL-mode sidecar files)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Secrets / environment
+.env
+.env.*
+*.pem
+*.key
+secrets.yaml
+secrets.json
+
+# Logs
+*.log
 
 # Editor / OS
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# Local data
-*.db
-*.sqlite
-*.sqlite3
+# Local runtime data
 .ollama_agent/
-ollama_agent.log
