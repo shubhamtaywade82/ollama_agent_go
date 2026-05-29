@@ -18,14 +18,19 @@ var mutatingTools = map[string]bool{
 	"run_shell":  true,
 }
 
+// SecretScannerFunc is called with a tool result; it returns the (possibly
+// redacted) result and a boolean indicating whether a secret was found.
+type SecretScannerFunc func(result string) (redacted string, found bool)
+
 // Host wraps a Registry with policy enforcement and observability. It is the
 // single execution path for all tool calls; neither the agent nor the TUI
 // should call Registry.Execute directly.
 type Host struct {
-	Registry *Registry
-	Policy   *policy.DefaultEngine
-	Obs      observability.Logger
-	Saga     storage.SagaStore // optional; nil disables saga tracking
+	Registry      *Registry
+	Policy        *policy.DefaultEngine
+	Obs           observability.Logger
+	Saga          storage.SagaStore      // optional; nil disables saga tracking
+	SecretScanner SecretScannerFunc       // optional; nil disables secret scanning
 	// SessionID is set by the runtime engine before each agent run so that
 	// observability records are associated with the correct session.
 	SessionID string
@@ -116,6 +121,21 @@ func (h *Host) Execute(ctx context.Context, name string, args map[string]any) (s
 			_ = h.Saga.Transition(ctx, mutID, storage.SagaApplied, after)
 			_ = h.Saga.Transition(ctx, mutID, storage.SagaCommitted, nil)
 		}
+	}
+
+	// Secret scanning: redact secrets in tool output before returning to agent.
+	if err == nil && h.SecretScanner != nil {
+		redacted, found := h.SecretScanner(out)
+		if found {
+			_ = h.Obs.Audit().Log(ctx, observability.AuditEvent{
+				SessionID: h.SessionID,
+				Actor:     "system",
+				Action:    "secret_scan",
+				Resource:  name,
+				Result:    "redacted",
+			})
+		}
+		out = redacted
 	}
 
 	return out, err

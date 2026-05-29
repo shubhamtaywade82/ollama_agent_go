@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"ollama_agent_go/internal/agent"
 	"ollama_agent_go/internal/agent/roles"
+	"ollama_agent_go/internal/governance"
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/orchestration"
@@ -111,6 +112,10 @@ type Engine struct {
 	// Set by bootstrap when orchestration is enabled.
 	Orchestrator *orchestration.Orchestrator
 
+	// Governor applies security and compliance policies.
+	// nil = no governance (default permissive behaviour).
+	Governor *governance.Governor
+
 	session *Session // current in-memory session
 }
 
@@ -205,6 +210,14 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		Result:    "ok",
 	})
 
+	// Governance: guardrail input check and PII scrubbing.
+	if e.Governor != nil {
+		if gr := e.Governor.Guardrail.CheckInput(ctx, input); gr.Blocked {
+			return fmt.Errorf("input blocked by guardrail: %s", gr.Reason)
+		}
+		input = e.Governor.ScrubInput(input)
+	}
+
 	userMsg := types.Message{Role: "user", Content: input}
 	e.Memory.Short().Append(userMsg)
 	_ = e.Sessions.AppendMessage(ctx, e.session.ID, userMsg)
@@ -264,9 +277,23 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		return err
 	}
 
+	// Governance: guardrail output check and PII scrubbing.
+	if e.Governor != nil && result != "" {
+		if gr := e.Governor.Guardrail.CheckOutput(ctx, result); gr.Blocked {
+			result = "[Response blocked by output guardrail]"
+			e.Obs.Info("output blocked by guardrail", "session", e.session.ID, "reason", gr.Reason)
+		} else {
+			result = e.Governor.ScrubOutput(result)
+		}
+	}
+
 	// Persist the assistant response so future turns have full context.
 	if result != "" {
-		assistantMsg := types.Message{Role: "assistant", Content: result}
+		stored := result
+		if e.Governor != nil {
+			stored = e.Governor.ScrubStorage(result)
+		}
+		assistantMsg := types.Message{Role: "assistant", Content: stored}
 		e.Memory.Short().Append(assistantMsg)
 		_ = e.Sessions.AppendMessage(ctx, e.session.ID, assistantMsg)
 	}

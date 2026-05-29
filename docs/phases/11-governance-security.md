@@ -1,6 +1,6 @@
 # Phase 11 — Governance & Security
 
-Tags: `#security` `#auth` `#authz` `#pii` `#guardrails` `#compliance` `#audit` `#p2` `#status/planned`
+Tags: `#security` `#auth` `#authz` `#pii` `#guardrails` `#compliance` `#audit` `#p2` `#status/done`
 
 Prerequisites: Phase 05 (audit log), Phase 01 (policy engine).
 

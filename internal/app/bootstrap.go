@@ -9,6 +9,7 @@ import (
 
 	"ollama_agent_go/internal/agent"
 	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/governance"
 	"ollama_agent_go/internal/indexer"
 	"ollama_agent_go/internal/mcp"
 	"ollama_agent_go/internal/memory"
@@ -144,11 +145,18 @@ func NewWithContext(ctx context.Context, cfg *config.Config, logWriter io.Writer
 	roleAgents := agent.BuildRoleAgents(ag, host)
 	selector := agent.NewSelector(ag, host, roleAgents)
 
+	// Governance — default compliance (secret scanning enabled, PII scrub off)
+	gov := governance.New(governance.DefaultCompliance)
+	host.SecretScanner = func(result string) (string, bool) {
+		return gov.ScanToolResult(result)
+	}
+
 	// Runtime engine
 	bus := runtime.NewInProcBus()
 	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills, mem)
 	engine.Retriever = ret
 	engine.Selector = selector
+	engine.Governor = gov
 	if idxr != nil {
 		engine.Indexer = idxr
 	}

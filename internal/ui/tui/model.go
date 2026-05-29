@@ -477,6 +477,36 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 			})
 		}
 
+	case "/compliance":
+		sub := ""
+		if len(parts) > 1 {
+			sub = parts[1]
+		}
+		switch sub {
+		case "report":
+			snap := m.engine.MetricsSnapshot()
+			var totalToolTotal, totalToolErr int64
+			for _, s := range snap.ToolCalls {
+				totalToolTotal += s.Total
+				totalToolErr += s.Errors
+			}
+			var totalLLM int64
+			for _, s := range snap.LLMCalls {
+				totalLLM += s.Total
+			}
+			totalToolOK := totalToolTotal - totalToolErr
+			totalToolFail := totalToolErr
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: fmt.Sprintf("**Compliance Report**\n\nTool calls: %d (success), %d (fail)\nLLM calls: %d\n\nSee audit log for full details (`/audit`).", totalToolOK, totalToolFail, int(totalLLM)),
+			})
+		default:
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/compliance report`",
+			})
+		}
+
 	default:
 		m.entries = append(m.entries, ChatEntry{
 			Kind:    entryError,
