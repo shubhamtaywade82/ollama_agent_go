@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,11 +11,29 @@ import (
 	"ollama_agent_go/internal/memory"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/providers/router"
+	"ollama_agent_go/internal/reliability"
 	"ollama_agent_go/internal/skills"
 	"ollama_agent_go/internal/storage"
 	"ollama_agent_go/internal/tools"
 	"ollama_agent_go/internal/types"
 )
+
+// HITLCheckpoint is delivered to the registered HITLHandler when engine.Interrupt() fires.
+type HITLCheckpoint struct {
+	SessionID string
+	Reason    string
+	Pending   []types.Message
+	At        time.Time
+}
+
+// HITLHandler decides whether to continue (true) or abort (false) after a checkpoint.
+type HITLHandler func(HITLCheckpoint) bool
+
+// FallbackConfig controls agent-level fallback when the primary model fails repeatedly.
+type FallbackConfig struct {
+	MaxAttempts   int
+	FallbackModel string
+}
 
 // Engine is the application brain. The UI calls Submit() and receives events;
 // everything else — policy, storage, observability — is handled here.
@@ -27,6 +46,11 @@ type Engine struct {
 	Obs      observability.Logger
 	Skills   []skills.Skill
 	Memory   memory.Manager
+
+	// Reliability
+	Fallback reliability.RetryConfig // retry config for agent-level fallback
+	hitl     HITLHandler             // nil = no HITL
+	hitlFlag atomic.Bool             // set by Interrupt(); cleared after checkpoint
 
 	session *Session // current in-memory session
 }
@@ -136,6 +160,10 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 		}
 	}()
 
+	// Wire HITL interrupt check into the agent loop for this run.
+	e.Agent.InterruptCheck = func() bool { return e.checkHITL(ctx) }
+	defer func() { e.Agent.InterruptCheck = nil }()
+
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
 		if emit != nil {
@@ -216,6 +244,38 @@ func (e *Engine) GetTool(name string) (tools.Tool, bool) { return e.ToolHost.Get
 
 // LoadedSkills returns the skills loaded into the agent.
 func (e *Engine) LoadedSkills() []skills.Skill { return e.Skills }
+
+// OnHITL registers a handler that is called when Interrupt() fires during Submit().
+// Pass nil to remove the handler.
+func (e *Engine) OnHITL(h HITLHandler) { e.hitl = h }
+
+// Interrupt signals the currently running Submit() to pause at the next iteration
+// boundary and call the registered HITLHandler. If no handler is registered the
+// signal is silently dropped.
+func (e *Engine) Interrupt(reason string) {
+	if e.hitl == nil {
+		return
+	}
+	e.hitlFlag.Store(true)
+}
+
+// checkHITL is called at the top of each agent iteration. It blocks until the
+// HITL handler returns. Returns false if the run should abort.
+func (e *Engine) checkHITL(ctx context.Context) bool {
+	if !e.hitlFlag.Swap(false) {
+		return true // no interrupt pending
+	}
+	if e.hitl == nil {
+		return true
+	}
+	cp := HITLCheckpoint{
+		SessionID: e.SessionID(),
+		Reason:    "operator interrupt",
+		Pending:   e.Memory.Short().Messages(),
+		At:        time.Now(),
+	}
+	return e.hitl(cp)
+}
 
 // ExportTrace returns all spans recorded for the current session.
 func (e *Engine) ExportTrace(ctx context.Context) ([]observability.Span, error) {

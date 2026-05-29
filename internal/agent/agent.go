@@ -31,6 +31,11 @@ type Agent struct {
 	MaxIterations int
 	Options       map[string]any
 	ContextBudget int
+
+	// InterruptCheck is called at the start of each loop iteration.
+	// If it returns false the run is aborted (HITL interrupt or policy enforcement).
+	// Nil = no check.
+	InterruptCheck func() bool
 }
 
 // New builds an Agent with sensible defaults.
@@ -66,6 +71,11 @@ func (a *Agent) Run(ctx context.Context, history []types.Message, emit Emit) (st
 
 	for iter := 0; iter < maxIters; iter++ {
 		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if a.InterruptCheck != nil && !a.InterruptCheck() {
+			err := fmt.Errorf("run aborted by interrupt check")
+			emit(Event{Kind: EventError, Text: err.Error()})
 			return "", err
 		}
 		resp, err := a.Client.Chat(ctx, types.ChatRequest{

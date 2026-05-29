@@ -1,6 +1,6 @@
 # Phase 06 — Reliability & Failure Management
 
-Tags: `#reliability` `#retry` `#backoff` `#circuit-breaker` `#fallback` `#hitl` `#error-detection` `#p1` `#status/planned`
+Tags: `#reliability` `#retry` `#backoff` `#circuit-breaker` `#fallback` `#hitl` `#error-detection` `#p1` `#status/done`
 
 Prerequisites: Phase 04 (provider router fallback), Phase 05 (spans for error rate measurement).
 

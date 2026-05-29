@@ -9,16 +9,19 @@ import (
 	"sync"
 
 	"ollama_agent_go/internal/providers"
+	"ollama_agent_go/internal/reliability"
 	"ollama_agent_go/internal/types"
 )
 
 // Router manages a pool of providers and routes chat requests intelligently.
 type Router struct {
-	mu         sync.RWMutex
-	pool       []providers.Provider        // ordered: first added = highest priority
-	index      map[string]providers.Provider
-	active     string // explicit override set by Switch(); empty = auto-select
-	rules      []Rule
+	mu       sync.RWMutex
+	pool     []providers.Provider // ordered: first added = highest priority
+	index    map[string]providers.Provider
+	active   string // explicit override set by Switch(); empty = auto-select
+	rules    []Rule
+	breakers *reliability.Breakers
+	retry    reliability.RetryConfig
 }
 
 // New creates a Router using the given rules. Pass no rules to use DefaultRules.
@@ -27,8 +30,10 @@ func New(rules ...Rule) *Router {
 		rules = DefaultRules
 	}
 	return &Router{
-		index: make(map[string]providers.Provider),
-		rules: rules,
+		index:    make(map[string]providers.Provider),
+		rules:    rules,
+		breakers: reliability.NewBreakers(reliability.DefaultBreakerConfig),
+		retry:    reliability.DefaultRetry,
 	}
 }
 
@@ -88,6 +93,7 @@ func (r *Router) Get(name string) (providers.Provider, bool) {
 
 // Chat routes the request to the best available provider. On error it
 // attempts a fallback to the next qualifying provider before giving up.
+// Retry with exponential backoff and per-provider circuit breaking are applied.
 func (r *Router) Chat(ctx context.Context, req types.ChatRequest) (types.ChatResponse, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -99,7 +105,7 @@ func (r *Router) Chat(ctx context.Context, req types.ChatRequest) (types.ChatRes
 	// 1. ModelHint: caller explicitly asked for a provider by model/name prefix.
 	if req.ModelHint != "" {
 		if p := r.findByHint(req.ModelHint); p != nil {
-			resp, err := p.Chat(ctx, req)
+			resp, err := r.callWithReliability(ctx, p, req)
 			if err == nil {
 				return resp, nil
 			}
@@ -107,20 +113,40 @@ func (r *Router) Chat(ctx context.Context, req types.ChatRequest) (types.ChatRes
 		}
 	}
 
-	// 2. Explicit Switch() override — use active provider directly, no fallback routing.
-	//    (User said "/model X"; respect that choice; fallback only on error.)
+	// 2. Task-based selection.
 	selected := r.selectForTask(Detect(req.Messages), "")
 	if selected == nil {
 		selected = r.pool[0]
 	}
 
-	resp, err := selected.Chat(ctx, req)
+	resp, err := r.callWithReliability(ctx, selected, req)
 	if err == nil {
 		return resp, nil
 	}
 
 	// 3. Fallback: try remaining providers in pool order.
 	return r.fallback(ctx, req, selected.Name())
+}
+
+// callWithReliability wraps a single provider call with circuit breaker + retry.
+func (r *Router) callWithReliability(ctx context.Context, p providers.Provider, req types.ChatRequest) (types.ChatResponse, error) {
+	cb := r.breakers.Get(p.Name())
+	if !cb.Allow() {
+		return types.ChatResponse{}, fmt.Errorf("circuit open for provider %q", p.Name())
+	}
+
+	var resp types.ChatResponse
+	err := reliability.Do(ctx, r.retry, func() error {
+		var e error
+		resp, e = p.Chat(ctx, req)
+		return e
+	})
+	if err != nil {
+		cb.RecordFailure()
+		return types.ChatResponse{}, err
+	}
+	cb.RecordSuccess()
+	return resp, nil
 }
 
 // Pricing returns the pricing of the active provider.
