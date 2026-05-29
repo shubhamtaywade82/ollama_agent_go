@@ -110,7 +110,7 @@ func NewModel(engine *runtime.Engine, ollamaClient *ollamaprovider.Client) *Mode
 	sp.Style = lipgloss.NewStyle().Foreground(colorAmber)
 
 	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(0),
 	)
 
@@ -158,7 +158,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textInput.Width = chatW - 4
 		if m.renderer != nil {
 			m.renderer, _ = glamour.NewTermRenderer(
-				glamour.WithAutoStyle(),
+				glamour.WithStandardStyle("dark"),
 				glamour.WithWordWrap(chatW-4),
 			)
 		}
