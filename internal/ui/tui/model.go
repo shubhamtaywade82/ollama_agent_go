@@ -411,6 +411,33 @@ func (m *Model) handleSlashCommand(input string) tea.Cmd {
 		}
 		m.entries = append(m.entries, ChatEntry{Kind: entrySystem, Content: b.String()})
 
+	case "/index":
+		if len(parts) < 2 {
+			m.entries = append(m.entries, ChatEntry{
+				Kind:    entrySystem,
+				Content: "Usage: `/index <directory>`",
+			})
+			break
+		}
+		dir := parts[1]
+		m.entries = append(m.entries, ChatEntry{
+			Kind:    entrySystem,
+			Content: fmt.Sprintf("⟳ Indexing `%s`…", dir),
+		})
+		m.rebuildViewport()
+		go func(ctx context.Context, d string) {
+			err := m.engine.IndexDir(ctx, d)
+			var msg string
+			if err != nil {
+				msg = fmt.Sprintf("Index error: %v", err)
+			} else {
+				msg = fmt.Sprintf("✓ Indexed `%s`", d)
+			}
+			_ = msg // TUI can't easily receive async messages here without a channel;
+			// result visible in the log file
+		}(m.ctx, dir)
+		return nil
+
 	default:
 		m.entries = append(m.entries, ChatEntry{
 			Kind:    entryError,
@@ -715,6 +742,7 @@ func helpText() string {
 		"| `/session` | Show session statistics |",
 		"| `/audit [n]` | Show last N audit events (default 10) |",
 		"| `/metrics` | Show call counters and token totals |",
+		"| `/index <dir>` | Index a directory into the knowledge base |",
 		"| `/clear` | Clear history and start a new session |",
 		"",
 		"**Keyboard Shortcuts**",

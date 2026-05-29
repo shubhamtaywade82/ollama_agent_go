@@ -41,6 +41,18 @@ type Config struct {
 	MCPServers []MCPServer
 	// MCPServerMode, when true, exposes our tools as an MCP server on stdio.
 	MCPServerMode bool
+	// RAG configures the retrieval-augmented generation pipeline.
+	RAG RAGConfig
+}
+
+// RAGConfig controls the embedded knowledge retrieval pipeline.
+type RAGConfig struct {
+	Enabled      bool
+	EmbedModel   string // e.g. "nomic-embed-text"
+	ChunkSize    int
+	ChunkOverlap int
+	TopK         int
+	StorePath    string // path to chromem DB directory
 }
 
 // Load reads configuration from environment variables, applying defaults.
@@ -90,6 +102,17 @@ func Load() *Config {
 
 	mcpServers := loadMCPConfig(filepath.Join(root, "mcp.json"))
 
+	ragEnabled := os.Getenv("OLLAMA_AGENT_RAG") == "1"
+	ragModel := os.Getenv("OLLAMA_AGENT_EMBED_MODEL")
+	if ragModel == "" {
+		ragModel = "nomic-embed-text"
+	}
+	ragStorePath := os.Getenv("OLLAMA_AGENT_KNOWLEDGE_PATH")
+	if ragStorePath == "" {
+		ragStorePath = filepath.Join(root, ".knowledge")
+	}
+	ragTopK := 5
+
 	return &Config{
 		Model:         model,
 		BaseURL:       baseURL,
@@ -100,6 +123,14 @@ func Load() *Config {
 		DBPath:        dbPath,
 		MCPServers:    mcpServers,
 		MCPServerMode: os.Getenv("OLLAMA_AGENT_MCP_SERVER") == "1",
+		RAG: RAGConfig{
+			Enabled:      ragEnabled,
+			EmbedModel:   ragModel,
+			ChunkSize:    256,
+			ChunkOverlap: 32,
+			TopK:         ragTopK,
+			StorePath:    ragStorePath,
+		},
 	}
 }
 

@@ -12,11 +12,26 @@ import (
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/providers/router"
 	"ollama_agent_go/internal/reliability"
+	"ollama_agent_go/internal/retriever"
 	"ollama_agent_go/internal/skills"
 	"ollama_agent_go/internal/storage"
 	"ollama_agent_go/internal/tools"
 	"ollama_agent_go/internal/types"
 )
+
+// indexerIface is the subset of indexer.Indexer needed by the engine.
+// Defined here to avoid importing the indexer package from runtime.
+type indexerIface interface {
+	IndexDir(ctx context.Context, dir string, exts []string) error
+}
+
+// IndexDir proxies to the wired Indexer, or returns an error if RAG is disabled.
+func (e *Engine) IndexDir(ctx context.Context, dir string) error {
+	if e.Indexer == nil {
+		return fmt.Errorf("RAG not enabled (set OLLAMA_AGENT_RAG=1)")
+	}
+	return e.Indexer.IndexDir(ctx, dir, nil)
+}
 
 // HITLCheckpoint is delivered to the registered HITLHandler when engine.Interrupt() fires.
 type HITLCheckpoint struct {
@@ -51,6 +66,10 @@ type Engine struct {
 	Fallback reliability.RetryConfig // retry config for agent-level fallback
 	hitl     HITLHandler             // nil = no HITL
 	hitlFlag atomic.Bool             // set by Interrupt(); cleared after checkpoint
+
+	// RAG — optional; nil disables automatic context injection and /index
+	Retriever *retriever.Retriever
+	Indexer   indexerIface // set by bootstrap when RAG is enabled
 
 	session *Session // current in-memory session
 }
@@ -159,6 +178,16 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) (ret
 			e.ToolHost.CompensatePending(sessionID)
 		}
 	}()
+
+	// RAG: inject retrieved context as a system message before the run.
+	if e.Retriever != nil {
+		if chunks, err := e.Retriever.Retrieve(ctx, input); err == nil && len(chunks) > 0 {
+			e.Memory.Short().Append(types.Message{
+				Role:    "system",
+				Content: e.Retriever.InjectContext(chunks),
+			})
+		}
+	}
 
 	// Wire HITL interrupt check into the agent loop for this run.
 	e.Agent.InterruptCheck = func() bool { return e.checkHITL(ctx) }

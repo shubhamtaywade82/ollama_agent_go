@@ -9,12 +9,15 @@ import (
 
 	"ollama_agent_go/internal/agent"
 	"ollama_agent_go/internal/config"
+	"ollama_agent_go/internal/indexer"
 	"ollama_agent_go/internal/mcp"
 	"ollama_agent_go/internal/memory"
+	"ollama_agent_go/internal/memory/longterm"
 	"ollama_agent_go/internal/observability"
 	"ollama_agent_go/internal/policy"
 	"ollama_agent_go/internal/providers/ollama"
 	"ollama_agent_go/internal/providers/router"
+	"ollama_agent_go/internal/retriever"
 	"ollama_agent_go/internal/runtime"
 	"ollama_agent_go/internal/skills"
 	sqstore "ollama_agent_go/internal/storage/sqlite"
@@ -23,8 +26,9 @@ import (
 
 // App holds the fully wired application components.
 type App struct {
-	Engine *runtime.Engine
-	Config *config.Config
+	Engine  *runtime.Engine
+	Config  *config.Config
+	Indexer *indexer.Indexer // nil when RAG is disabled
 }
 
 // New wires all internal packages and returns a ready-to-run App.
@@ -99,10 +103,39 @@ func NewWithContext(ctx context.Context, cfg *config.Config, logWriter io.Writer
 	ag.MaxIterations = cfg.MaxIterations
 	ag.System = skills.Inject(agent.SystemPrompt(host), loadedSkills)
 
+	// RAG pipeline (optional — only when OLLAMA_AGENT_RAG=1)
+	var ltStore longterm.Store = longterm.NoopStore{}
+	var ret *retriever.Retriever
+	var idxr *indexer.Indexer
+	if cfg.RAG.Enabled {
+		embedder := indexer.NewOllamaEmbedder(cfg.BaseURL, cfg.RAG.EmbedModel)
+		chromemEmbedFn := func(ctx context.Context, text string) ([]float32, error) {
+			vecs, err := embedder.Embed(ctx, []string{text})
+			if err != nil || len(vecs) == 0 {
+				return nil, err
+			}
+			return vecs[0], nil
+		}
+		cs, err := longterm.NewChromemStore(cfg.RAG.StorePath, chromemEmbedFn)
+		if err != nil {
+			obs.Error("rag init", err)
+		} else {
+			ltStore = cs
+			ret = retriever.New(cs, cfg.RAG.TopK)
+			idxr = indexer.New(cs, embedder, cfg.Root)
+			idxr.WithChunkConfig(indexer.ChunkConfig{
+				Size: cfg.RAG.ChunkSize, Overlap: cfg.RAG.ChunkOverlap,
+			})
+			tools.RegisterKnowledgeTool(reg, cs)
+			obs.Info("rag enabled", "store", cfg.RAG.StorePath)
+		}
+	}
+	_ = idxr // exposed via App for /index command
+
 	// Memory manager (short-term rolling window + SQLite episodic/profile)
 	mem := memory.New(
 		cfg.ContextBudget,
-		nil, // longterm: Phase 08 (RAG) — no-op stub for now
+		ltStore,
 		sqstore.NewEpisodicStore(db),
 		sqstore.NewProfileStore(db),
 	)
@@ -110,6 +143,10 @@ func NewWithContext(ctx context.Context, cfg *config.Config, logWriter io.Writer
 	// Runtime engine
 	bus := runtime.NewInProcBus()
 	engine := runtime.NewEngine(ag, host, r, store, bus, obs, loadedSkills, mem)
+	engine.Retriever = ret
+	if idxr != nil {
+		engine.Indexer = idxr
+	}
 
-	return &App{Engine: engine, Config: cfg}, nil
+	return &App{Engine: engine, Config: cfg, Indexer: idxr}, nil
 }

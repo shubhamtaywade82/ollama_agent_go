@@ -1,6 +1,6 @@
 # Phase 08 — RAG / Knowledge Retrieval
 
-Tags: `#rag` `#vector` `#embeddings` `#retrieval` `#knowledge` `#docs` `#indexer` `#sqlite-vec` `#p2` `#status/planned`
+Tags: `#rag` `#vector` `#embeddings` `#retrieval` `#knowledge` `#docs` `#indexer` `#chromem-go` `#p2` `#status/done`
 
 Prerequisites: Phase 02 (memory.longterm stub), Phase 01 (tools.Host for indexer tool).
 
