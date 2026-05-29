@@ -101,4 +101,18 @@ CREATE TABLE IF NOT EXISTS profile (
     value      TEXT NOT NULL,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS mutations (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    tool         TEXT NOT NULL,
+    args         TEXT NOT NULL,
+    before_state BLOB,
+    after_state  BLOB,
+    status       TEXT NOT NULL DEFAULT 'reserved',
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mutations_session ON mutations(session_id, status);
 `

@@ -43,18 +43,49 @@ type ToolInvocationRecord struct {
 
 // SessionStore persists sessions and their associated data.
 type SessionStore interface {
-	// Create creates a new session and returns it.
 	Create(ctx context.Context, id, model string) (*Session, error)
-	// Get retrieves a session by ID, including its full conversation.
 	Get(ctx context.Context, id string) (*Session, error)
-	// SetState updates the session state.
 	SetState(ctx context.Context, id string, state SessionState) error
-	// AppendMessage appends a message to the session's conversation.
 	AppendMessage(ctx context.Context, sessionID string, msg types.Message) error
-	// RecordToolInvocation stores a completed tool call.
 	RecordToolInvocation(ctx context.Context, rec ToolInvocationRecord) error
-	// RecordTokens logs token usage for a session turn.
 	RecordTokens(ctx context.Context, sessionID, model string, prompt, output int) error
-	// Close releases underlying resources.
 	Close() error
 }
+
+// ─── Saga / WAL ────────────────────────────────────────────────────────────
+
+// SagaStatus is the lifecycle state of a single mutation within a saga.
+type SagaStatus string
+
+const (
+	SagaReserved   SagaStatus = "reserved"
+	SagaLocked     SagaStatus = "locked"
+	SagaApplied    SagaStatus = "applied"
+	SagaCommitted  SagaStatus = "committed"
+	SagaRolledBack SagaStatus = "rolled_back"
+)
+
+// Mutation records a single filesystem-mutating tool call and its before/after state.
+type Mutation struct {
+	ID          string
+	SessionID   string
+	Tool        string
+	Args        map[string]any
+	BeforeState []byte // file content before execution; nil if the file was new
+	AfterState  []byte // file content after execution
+	Status      SagaStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// SagaStore persists mutation lifecycle records for WAL-style rollback.
+type SagaStore interface {
+	// Reserve creates a new mutation record in the reserved state.
+	Reserve(ctx context.Context, m Mutation) error
+	// Transition moves a mutation to the given state, optionally recording after-state.
+	Transition(ctx context.Context, id string, to SagaStatus, after []byte) error
+	// Compensable returns all applied or committed mutations for sessionID,
+	// ordered oldest-first, suitable for reverse-order compensation.
+	Compensable(ctx context.Context, sessionID string) ([]Mutation, error)
+}
+

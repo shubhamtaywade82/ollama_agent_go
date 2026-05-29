@@ -108,6 +108,14 @@ func (e *Engine) Submit(ctx context.Context, input string, emit agent.Emit) erro
 	_ = e.Sessions.SetState(ctx, e.session.ID, storage.StateRunning)
 	e.session.State = StateRunning
 
+	// On context cancellation, compensate any in-flight filesystem mutations.
+	sessionID := e.session.ID
+	defer func() {
+		if ctx.Err() != nil {
+			e.ToolHost.CompensatePending(sessionID)
+		}
+	}()
+
 	// Wrap emit to publish events to the bus as well.
 	wrapped := func(ev agent.Event) {
 		if emit != nil {

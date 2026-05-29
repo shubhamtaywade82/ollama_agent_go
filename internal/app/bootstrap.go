@@ -49,9 +49,10 @@ func New(cfg *config.Config, logWriter io.Writer) (*App, error) {
 	gatedTools := []string{"write_file", "run_shell", "edit_file"}
 	pol := policy.NewDefaultEngine(cfg.Root, gatedTools, noApproval)
 
-	// Tool registry → Host
+	// Tool registry → Host (with saga store wired for WAL rollback)
 	reg := tools.Default(cfg.Root)
 	host := tools.NewHost(reg, pol, obs)
+	host.Saga = store
 
 	// Provider router (Ollama only; cloud providers added via env vars later)
 	ollamaClient := ollama.NewClient(cfg.BaseURL, cfg.Model)
